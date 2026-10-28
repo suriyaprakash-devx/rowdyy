@@ -161,16 +161,267 @@ class UpstoxClientManager:
 
         raise RuntimeError("Unable to download Upstox NSE instrument master and no cache available.")
 
+    def _load_disk_cache_sync(self):
+        """Synchronously populates in-memory maps from disk cache if present."""
+        if INSTRUMENT_CACHE_FILE.exists():
+            try:
+                with open(INSTRUMENT_CACHE_FILE, "r", encoding="utf-8") as f:
+                    cached_data = json.load(f)
+                    self._instrument_map = cached_data.get("symbol_map", {})
+                    self._isin_map = cached_data.get("isin_map", {})
+                    self._last_loaded = time.time()
+                    logger.info(f"Synchronously loaded {len(self._instrument_map)} NSE_EQ instruments from disk cache.")
+            except Exception as e:
+                logger.warning(f"Failed to read instruments disk cache synchronously: {e}")
+
     def map_symbol_to_instrument(self, symbol: str, isin: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Maps a symbol or ISIN to its Upstox instrument details.
+        Auto-loads disk cache if in-memory map is not yet populated.
         """
-        sym_clean = symbol.strip().upper()
+        sym_clean = symbol.strip().upper().replace(".NS", "").replace(".BO", "")
+        if not self._instrument_map:
+            self._load_disk_cache_sync()
+
         if sym_clean in self._instrument_map:
             return self._instrument_map[sym_clean]
         if isin and isin.strip().upper() in self._isin_map:
             return self._isin_map[isin.strip().upper()]
-        return None
+
+        return {
+            "instrument_key": f"NSE_EQ|{sym_clean}",
+            "exchange": "NSE_EQ",
+            "symbol": sym_clean,
+            "name": sym_clean,
+            "instrument_type": "EQ"
+        }
+
+    async def fetch_intraday_candles_v3(
+        self,
+        instrument_key: str,
+        unit: str = "minutes",
+        interval: str = "10",
+        access_token: Optional[str] = None
+    ) -> List[List[Any]]:
+        """
+        Fetches intraday candles for the current session using Upstox API v3.
+        Endpoint: GET /v3/historical-candle/intraday/{instrument_key}/{unit}/{interval}
+        Returns list of candles [timestamp, open, high, low, close, volume, oi] (newest first).
+        """
+        encoded_key = urllib.parse.quote(instrument_key)
+        url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/{unit}/{interval}"
+        headers = {"Accept": "application/json", "User-Agent": "UpstoxScanner/1.0"}
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for attempt in range(3):
+                try:
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        return data.get("data", {}).get("candles", [])
+                    elif resp.status_code == 429:
+                        backoff = (attempt + 1) * 0.75
+                        logger.warning(f"Upstox rate limit (429) for {instrument_key}. Retrying in {backoff:.1f}s...")
+                        await asyncio.sleep(backoff)
+                    elif resp.status_code == 401:
+                        raise HTTPException_401("Upstox authentication expired. Please reconnect your Upstox account.")
+                    else:
+                        logger.debug(f"Upstox intraday v3 {resp.status_code} for {instrument_key}: {resp.text[:100]}")
+                        await asyncio.sleep(0.3)
+                except HTTPException_401:
+                    raise
+                except Exception as e:
+                    if attempt == 2:
+                        logger.debug(f"Failed to fetch v3 intraday candles for {instrument_key}: {e}")
+                    await asyncio.sleep(0.3)
+        return []
+
+    async def fetch_historical_candles_v3(
+        self,
+        instrument_key: str,
+        to_date: str,
+        from_date: str,
+        unit: str = "minutes",
+        interval: str = "10",
+        access_token: Optional[str] = None
+    ) -> List[List[Any]]:
+        """
+        Fetches historical multi-day candles with custom interval using Upstox API v3.
+        Endpoint: GET /v3/historical-candle/{instrument_key}/{unit}/{interval}/{to_date}/{from_date}
+        """
+        encoded_key = urllib.parse.quote(instrument_key)
+        url = f"https://api.upstox.com/v3/historical-candle/{encoded_key}/{unit}/{interval}/{to_date}/{from_date}"
+        headers = {"Accept": "application/json", "User-Agent": "UpstoxScanner/1.0"}
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
+
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            for attempt in range(3):
+                try:
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        return data.get("data", {}).get("candles", [])
+                    elif resp.status_code == 429:
+                        backoff = (attempt + 1) * 0.75
+                        await asyncio.sleep(backoff)
+                    elif resp.status_code == 401:
+                        raise HTTPException_401("Upstox authentication expired.")
+                    else:
+                        await asyncio.sleep(0.3)
+                except HTTPException_401:
+                    raise
+                except Exception as e:
+                    await asyncio.sleep(0.3)
+        return []
+
+    async def fetch_10m_candles(
+        self,
+        instrument_key: str,
+        symbol: Optional[str] = None,
+        min_candles: int = 35,
+        access_token: Optional[str] = None
+    ) -> List[List[Any]]:
+        """
+        Fetches completed 10-minute candles for the stock.
+        Combines current day v3 intraday 10-minute candles with prior days if needed,
+        ensuring at least min_candles (default 35) are available to compute SMA 6 and SMA 30.
+        """
+        candles: List[List[Any]] = []
+        if access_token:
+            # 1. Fetch current day intraday 10-minute candles
+            try:
+                candles = await self.fetch_intraday_candles_v3(
+                    instrument_key=instrument_key,
+                    unit="minutes",
+                    interval="10",
+                    access_token=access_token
+                )
+            except HTTPException_401:
+                raise
+            except Exception as e:
+                logger.debug(f"V3 intraday fetch error for {instrument_key}: {e}")
+
+            # 2. If fewer than min_candles, fetch previous trading days to fill history
+            if len(candles) < min_candles:
+                now = datetime.now()
+                to_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+                from_date = (now - timedelta(days=5)).strftime("%Y-%m-%d")
+                try:
+                    hist_candles = await self.fetch_historical_candles_v3(
+                        instrument_key=instrument_key,
+                        to_date=to_date,
+                        from_date=from_date,
+                        unit="minutes",
+                        interval="10",
+                        access_token=access_token
+                    )
+                    if hist_candles:
+                        # Append historical bars (both are newest first, so existing candles come before hist_candles)
+                        candles = candles + hist_candles
+                except Exception as e:
+                    logger.debug(f"V3 historical 10m fetch error for {instrument_key}: {e}")
+
+        # Fallback to local / live feed synthesis if Upstox candles insufficient or no token
+        if len(candles) < min_candles and symbol:
+            try:
+                from backend.live_feed import get_intraday_10m_candles_fallback
+                fallback_candles = await get_intraday_10m_candles_fallback(symbol, min_candles=min_candles)
+                if fallback_candles and len(fallback_candles) >= len(candles):
+                    candles = fallback_candles
+            except Exception as e:
+                logger.debug(f"Intraday fallback error for {symbol}: {e}")
+
+        return candles
+
+    async def fetch_batch_quotes(
+        self,
+        instrument_keys: List[str],
+        access_token: Optional[str] = None
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Fetches live market quotes for multiple instrument keys in batches.
+        Upstox API v2 market quotes endpoint accepts comma-separated instrument keys (up to 50).
+        Returns mapping: instrument_key -> quote dict with last_price, volume, vwap, depth/spread.
+        """
+        results: Dict[str, Dict[str, Any]] = {}
+        if not instrument_keys:
+            return results
+
+        clean_keys = [k for k in instrument_keys if k and k.startswith("NSE_EQ|")]
+        batch_size = 50
+        headers = {"Accept": "application/json", "User-Agent": "UpstoxScanner/1.0"}
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
+
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            for i in range(0, len(clean_keys), batch_size):
+                batch = clean_keys[i:i + batch_size]
+                encoded_keys = ",".join([urllib.parse.quote(k) for k in batch])
+                url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={encoded_keys}"
+                try:
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json().get("data", {})
+                        for key_raw, q in data.items():
+                            # Upstox returns keys like 'NSE_EQ:RELIANCE' or 'NSE_EQ|INE...'
+                            ohlc = q.get("ohlc", {})
+                            last_price = float(q.get("last_price", 0.0) or 0.0)
+                            volume = int(q.get("volume", 0) or 0)
+                            vwap = float(q.get("average_price", 0.0) or last_price or 0.0)
+                            prev_close = float(ohlc.get("close", 0.0) or last_price or 0.0)
+                            change = round(last_price - prev_close, 2) if prev_close else 0.0
+                            change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+
+                            # Bid-Ask spread
+                            depth = q.get("depth", {})
+                            buy_depth = depth.get("buy", [])
+                            sell_depth = depth.get("sell", [])
+                            best_bid = float(buy_depth[0].get("price", 0.0)) if buy_depth else 0.0
+                            best_ask = float(sell_depth[0].get("price", 0.0)) if sell_depth else 0.0
+                            spread_pct = round(((best_ask - best_bid) / last_price) * 100, 3) if last_price and best_ask > best_bid else 0.0
+
+                            # Traded value calculation
+                            traded_value = vwap * volume if vwap > 0 else last_price * volume
+
+                            matched_key = None
+                            for original_k in batch:
+                                if original_k in key_raw or key_raw in original_k:
+                                    matched_key = original_k
+                                    break
+                            inst_key = matched_key or key_raw
+
+                            results[inst_key] = {
+                                "instrument_key": inst_key,
+                                "symbol": q.get("trading_symbol", "").upper(),
+                                "last_price": last_price,
+                                "open": float(ohlc.get("open", 0.0)),
+                                "high": float(ohlc.get("high", 0.0)),
+                                "low": float(ohlc.get("low", 0.0)),
+                                "close": prev_close,
+                                "volume": volume,
+                                "vwap": vwap,
+                                "change": change,
+                                "change_pct": change_pct,
+                                "traded_value": traded_value,
+                                "best_bid": best_bid,
+                                "best_ask": best_ask,
+                                "spread_pct": spread_pct,
+                                "timestamp": int(time.time())
+                            }
+                    elif resp.status_code == 429:
+                        await asyncio.sleep(1.0)
+                    elif resp.status_code == 401:
+                        raise HTTPException_401("Upstox authentication expired.")
+                except HTTPException_401:
+                    raise
+                except Exception as e:
+                    logger.debug(f"Batch quote error for batch {i//batch_size}: {e}")
+                await asyncio.sleep(0.15)  # Respect rate limit (max 10 req/s)
+
+        return results
 
     async def fetch_historical_daily_candles(
         self,
@@ -212,7 +463,6 @@ class UpstoxClientManager:
                         candles = data.get("data", {}).get("candles", [])
                         break
                     elif resp.status_code == 429:
-                        # Rate limit reached, back off and retry
                         backoff = (attempt + 1) * 0.8
                         logger.warning(f"Upstox rate limit (429) on {instrument_key}. Retrying in {backoff:.1f}s...")
                         await asyncio.sleep(backoff)
@@ -233,11 +483,9 @@ class UpstoxClientManager:
                 today_str = now.strftime("%Y-%m-%d")
                 has_today = any(c[0].startswith(today_str) for c in candles)
 
-                # Fetch today's candle if not in historical data
                 if not has_today:
                     today_candle = await self._fetch_current_day_candle(client, encoded_key, headers, today_str, symbol=symbol)
                     if today_candle:
-                        # Prepend today's candle (since Upstox returns newest candle first)
                         candles.insert(0, today_candle)
 
         return candles
@@ -252,7 +500,7 @@ class UpstoxClientManager:
     ) -> Optional[List[Any]]:
         """
         Synthesizes today's current day candle from Upstox 1-minute or 30-minute intraday API,
-        quotes endpoint, or live feed fallback, ensuring today's data is factored into SMA 6 & SMA 30.
+        quotes endpoint, or live feed fallback, ensuring today's data is factored into SMA calculations.
         """
         intraday_url = f"{UPSTOX_INTRADAY_API}/{encoded_key}/1minute"
         try:
@@ -310,4 +558,5 @@ class HTTPException_401(Exception):
     pass
 
 upstox_client_manager = UpstoxClientManager()
+
 

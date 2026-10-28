@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import numpy as np
@@ -10,27 +10,32 @@ from backend.config import settings
 from backend.database import SessionLocal
 from backend.models import ScanRun, ScanResult, cleanup_old_scans
 from backend.upstox_client import upstox_client_manager, HTTPException_401
-from backend.universe import get_combined_stock_universe
+from backend.most_active import most_active_manager
+from backend.strategy import strategy_engine
 
 logger = logging.getLogger(__name__)
 
 class ScannerManager:
     """
-    Manages semi-algo scanner execution, state, progress tracking,
-    and crossover signal detection.
+    Manages semi-algo intraday scanner execution for NSE Most Active Stocks.
+    Evaluates completed 10-minute candles with SMA 6/30 crossover,
+    relative volume >= 1.5, price action confirmation, and liquidity filters.
+    Strictly alert-only: Never calls order execution APIs.
     """
 
     def __init__(self):
         self.is_running: bool = False
-        self.status: str = "idle"  # idle, running, completed, failed
+        self.status: str = "idle"  # idle, running, completed, failed, stopped
         self.progress_message: str = "Ready to scan."
         self.stocks_scanned: int = 0
         self.total_stocks: int = 0
         self.signals_found: int = 0
         self.current_scan_id: Optional[int] = None
         self.error: Optional[str] = None
-        self.latest_dataframe: Optional[pd.DataFrame] = None
         self.latest_results: List[Dict[str, Any]] = []
+        self.confirmed_buy_alerts: List[Dict[str, Any]] = []
+        self.confirmed_sell_alerts: List[Dict[str, Any]] = []
+        self.market_metadata: Dict[str, Any] = {}
         self.stop_requested: bool = False
         self._lock = asyncio.Lock()
 
@@ -49,14 +54,25 @@ class ScannerManager:
             "stocks_scanned": self.stocks_scanned,
             "total_stocks": self.total_stocks,
             "signals_found": self.signals_found,
+            "confirmed_buys": len(self.confirmed_buy_alerts),
+            "confirmed_sells": len(self.confirmed_sell_alerts),
             "scan_id": self.current_scan_id,
             "error": self.error
         }
 
-    async def run_scan(self, access_token: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def run_scan(
+        self,
+        access_token: Optional[str] = None,
+        universe_filter: str = "ALL",
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Executes the full NIFTY 100 + NIFTY 200 SMA 6 & 30 crossover scan.
-        Supports both official Upstox API v2 and real-time live market feed fallback.
+        Executes the dynamic NIFTY 500 SMA 6/30 intraday scanner.
+        1. Discovers NIFTY 500 eligible NSE equity stocks with index membership flags.
+        2. Retrieves completed 10-minute candles for each stock via Upstox API v3 or high-speed feed.
+        3. Computes SMA 6, SMA 30, relative volume, VWAP, Supertrend, and price-action confirmation.
+        4. Ranks confirmed BUY and SELL alerts by composite signal score (0-100).
+        5. Persists results and returns formatted datasets.
         """
         async with self._lock:
             if self.is_running:
@@ -82,171 +98,234 @@ class ScannerManager:
         self.current_scan_id = scan_run.id
 
         try:
-            # Step 1: Load stock universe
-            self.progress_message = "Loading stock universe..."
-            logger.info(self.progress_message)
-            universe = await get_combined_stock_universe()
+            target_limit = limit or getattr(settings, "MOST_ACTIVE_LIMIT", 500)
+            target_universe = (universe_filter or "NIFTY500").upper()
 
-            if not universe:
-                raise RuntimeError("Failed to build stock universe: No valid stocks found.")
-
-            self.total_stocks = len(universe)
-            mode_desc = "Upstox API v2" if access_token else "Real-Time Live Market Feed"
-            self.progress_message = f"Scanning {self.total_stocks} stocks via {mode_desc}..."
+            # Step 1: Discover NIFTY 500 Candidate Universe
+            self.progress_message = f"Discovering NIFTY {target_universe} stocks (up to {target_limit} equities)..."
             logger.info(self.progress_message)
 
-            # Pre-load cache fallback if available
-            cache_stocks_map = {}
-            from pathlib import Path
-            import json
-            cache_file = Path("./data/scanner_data_cache.json")
-            if cache_file.exists():
-                try:
-                    with open(cache_file, "r", encoding="utf-8") as f:
-                        cdata = json.load(f)
-                    for s in cdata.get("stocks", []):
-                        sym = s.get("symbol", "").upper()
-                        if sym:
-                            cache_stocks_map[sym] = s.get("daily_candles", [])
-                except Exception as e:
-                    logger.debug(f"Cache pre-read notice: {e}")
+            from backend.universe import get_combined_stock_universe
+            from backend.live_feed import get_batch_live_quotes
 
-            # Step 2: Concurrently scan all stocks with semaphore rate-limiting
-            semaphore = asyncio.Semaphore(settings.SCAN_CONCURRENCY)
-            detected_signals: List[Dict[str, Any]] = []
+            universe_stocks = await get_combined_stock_universe(index_filter=target_universe)
 
-            async def scan_single_stock(stock: Dict[str, str]):
-                symbol = stock["symbol"].upper()
-                company = stock["company"]
-                instrument_key = stock["instrument_key"]
+            if not universe_stocks:
+                active_data = await most_active_manager.get_most_active_stocks(
+                    access_token=access_token,
+                    force_refresh=True,
+                    limit=target_limit
+                )
+                candidate_list = active_data.get("stocks", [])
+                discovery_source = active_data.get("source", "Market Feed")
+            else:
+                discovery_source = f"NIFTY {target_universe} Master"
+                candidate_slice = universe_stocks[:target_limit]
+                sym_list = [s["symbol"] for s in candidate_slice]
+                live_quotes = await get_batch_live_quotes(sym_list)
+
+                candidate_list = []
+                for idx, s in enumerate(candidate_slice):
+                    sym = s["symbol"]
+                    q = live_quotes.get(sym, {})
+                    lp = q.get("last_price", 0.0)
+                    vol = q.get("volume", 0)
+                    tv = lp * vol if lp > 0 and vol > 0 else 0.0
+                    candidate_list.append({
+                        "symbol": sym,
+                        "company": s["company"],
+                        "instrument_key": s["instrument_key"],
+                        "isin": s.get("isin", ""),
+                        "industry": s.get("industry", "Diversified"),
+                        "is_nifty50": s.get("is_nifty50", False),
+                        "is_nifty100": s.get("is_nifty100", False),
+                        "is_nifty200": s.get("is_nifty200", False),
+                        "is_nifty500": True,
+                        "is_midcap": s.get("is_midcap", False),
+                        "is_smallcap": s.get("is_smallcap", False),
+                        "last_price": lp,
+                        "change_pct": q.get("change_pct", 0.0),
+                        "cumulative_volume": vol,
+                        "traded_value": tv,
+                        "traded_value_cr": round(tv / 1e7, 2),
+                        "spread_pct": 0.05,
+                        "activity_rank": idx + 1
+                    })
+
+            self.total_stocks = len(candidate_list)
+            self.market_metadata = {
+                "source": discovery_source,
+                "universe": target_universe,
+                "total_checked": self.total_stocks,
+                "most_active_count": self.total_stocks,
+                "discovery_time": datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%H:%M:%S IST")
+            }
+
+            self.progress_message = f"Evaluating completed 10m candles for {self.total_stocks} NIFTY stocks ({discovery_source})..."
+            logger.info(self.progress_message)
+
+            # Step 2: Concurrently scan stocks with rate-limiting semaphore
+            concurrency_count = getattr(settings, "SCAN_CONCURRENCY", 20)
+            semaphore = asyncio.Semaphore(concurrency_count)
+            all_scanned_stocks: List[Dict[str, Any]] = []
+
+            async def scan_stock_worker(stock_item: Dict[str, Any]):
+                sym = stock_item["symbol"].upper()
+                comp = stock_item.get("company", sym)
+                inst_key = stock_item["instrument_key"]
+                act_rank = stock_item.get("activity_rank", 1)
+                tv_cr = stock_item.get("traded_value_cr", 0.0)
+                spread_pct = stock_item.get("spread_pct", 0.05)
+                lp = stock_item.get("last_price", 0.0)
+                chg_pct = stock_item.get("change_pct", 0.0)
+                vol = stock_item.get("cumulative_volume", 0)
 
                 async with semaphore:
                     if self.stop_requested:
                         return None
 
                     try:
-                        candles = None
-                        if access_token:
-                            try:
-                                candles = await upstox_client_manager.fetch_historical_daily_candles(
-                                    instrument_key=instrument_key,
-                                    symbol=symbol,
-                                    days_back=120,
-                                    access_token=access_token,
-                                    include_current_day=settings.INCLUDE_CURRENT_DAY_CANDLE
-                                )
-                            except HTTPException_401:
-                                # Fall through to live feed fallback below
-                                candles = None
+                        # Fetch 10-minute candles (combines intraday v3 + recent historical bars)
+                        raw_candles = await upstox_client_manager.fetch_10m_candles(
+                            instrument_key=inst_key,
+                            symbol=sym,
+                            min_candles=35,
+                            access_token=access_token
+                        )
 
                         if self.stop_requested:
                             return None
 
-                        # Fallback to cache + live candle if Upstox candles not available
-                        if not candles or len(candles) < 31:
-                            cached_candles = cache_stocks_map.get(symbol, [])
-                            if cached_candles:
-                                # Format cached candles into Upstox format [timestamp, open, high, low, close, volume, 0]
-                                # Note: cached candles are oldest-to-newest, while Upstox expects newest-first
-                                upstox_formatted = []
-                                for c in reversed(cached_candles):
-                                    dt = c.get("date", "")
-                                    upstox_formatted.append([
-                                        f"{dt}T00:00:00+05:30",
-                                        c.get("open", 0.0),
-                                        c.get("high", 0.0),
-                                        c.get("low", 0.0),
-                                        c.get("close", 0.0),
-                                        c.get("volume", 0),
-                                        0
-                                    ])
+                        # Analyze with SMA 6/30 completed candle strategy
+                        analysis = strategy_engine.analyze_stock(
+                            symbol=sym,
+                            company=comp,
+                            raw_candles=raw_candles,
+                            activity_rank=act_rank,
+                            session_traded_value_cr=tv_cr,
+                            bid_ask_spread_pct=spread_pct
+                        )
 
-                                # Incorporate today's live candle if requested
-                                if settings.INCLUDE_CURRENT_DAY_CANDLE:
-                                    try:
-                                        from backend.live_feed import get_today_live_candle
-                                        live_c = await get_today_live_candle(symbol)
-                                        if live_c:
-                                            # Check if today's date already exists in the candles
-                                            today_tag = live_c[0][:10]
-                                            if not any(cand[0].startswith(today_tag) for cand in upstox_formatted):
-                                                upstox_formatted.insert(0, live_c)
-                                    except Exception as e:
-                                        logger.debug(f"Live candle fetch notice for {symbol}: {e}")
+                        if not analysis:
+                            analysis = {
+                                "Symbol": sym,
+                                "Company": comp,
+                                "Signal Type": "WATCH",
+                                "Status": "WATCH",
+                                "Is Confirmed": False,
+                                "Is Duplicate": False,
+                                "Crossover Timestamp": "N/A",
+                                "Candle Timestamp": datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%dT%H:%M:%S+05:30"),
+                                "Close": lp,
+                                "SMA 6": lp,
+                                "SMA 30": lp,
+                                "Spread Pct": 0.0,
+                                "Relative Volume": 1.0,
+                                "Traded Value Cr": tv_cr,
+                                "Activity Rank": act_rank,
+                                "Freshness": "NO_CANDLES",
+                                "Signal Score": 40.0,
+                                "Confirmation Notes": "Insufficient completed 10-minute candles",
+                                "Crossover Offset": 999
+                            }
 
-                                candles = upstox_formatted
-
-                        if self.stop_requested:
-                            return None
-
-                        if not candles or len(candles) < 31:
-                            logger.debug(f"Insufficient candles for {symbol}. Skipping.")
-                            return None
-
-                        # Analyze candles for confirmed SMA 6 & SMA 30 crossover
-                        signal_info = self._detect_crossover(symbol, company, candles)
-                        return signal_info
+                        # Augment with live session metrics & Nifty flags
+                        analysis["Change Pct"] = chg_pct
+                        analysis["Cumulative Volume"] = vol
+                        analysis["Instrument Key"] = inst_key
+                        analysis["LTP"] = lp if lp > 0 else analysis.get("Close", 0.0)
+                        analysis["Industry"] = stock_item.get("industry", "Diversified")
+                        analysis["is_nifty50"] = stock_item.get("is_nifty50", False)
+                        analysis["is_nifty100"] = stock_item.get("is_nifty100", False)
+                        analysis["is_nifty200"] = stock_item.get("is_nifty200", False)
+                        analysis["is_nifty500"] = True
+                        analysis["is_midcap"] = stock_item.get("is_midcap", False)
+                        analysis["is_smallcap"] = stock_item.get("is_smallcap", False)
+                        return analysis
 
                     except Exception as e:
-                        logger.warning(f"Unable to retrieve data for {symbol}: {e}. Skipping stock.")
+                        logger.warning(f"Error scanning {sym}: {e}")
                         return None
                     finally:
                         self.stocks_scanned += 1
-                        if self.stop_requested:
-                            self.progress_message = f"Scan stopped by user ({self.stocks_scanned} / {self.total_stocks})"
-                        elif self.stocks_scanned % 10 == 0 or self.stocks_scanned == self.total_stocks:
-                            self.progress_message = f"Scanning {self.stocks_scanned} / {self.total_stocks}"
+                        if self.stocks_scanned % 15 == 0 or self.stocks_scanned == self.total_stocks:
+                            self.progress_message = f"Scanning NIFTY 500 Intraday: {self.stocks_scanned} / {self.total_stocks} stocks completed..."
 
-            tasks = [scan_single_stock(stock) for stock in universe]
+            tasks = [scan_stock_worker(s) for s in candidate_list]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             for res in results:
                 if isinstance(res, Exception):
-                    logger.warning(f"Stock scan error: {res}")
+                    logger.warning(f"Worker exception: {res}")
                 elif res:
-                    detected_signals.append(res)
+                    all_scanned_stocks.append(res)
 
             if self.stop_requested:
                 self.status = "stopped"
-                self.progress_message = f"Scan stopped by user. Scanned {self.stocks_scanned} stocks, found {len(detected_signals)} crossovers."
-                logger.info(self.progress_message)
+                self.progress_message = "Scan stopped by user."
+            else:
+                self.status = "completed"
 
-            # Step 3: Rank by latest crossover date
-            self.progress_message = "Ranking signals and generating DataFrame..."
-            logger.info(self.progress_message)
+            # Step 3: Separate and rank Confirmed BUY and Confirmed SELL alerts
+            confirmed_buys = [s for s in all_scanned_stocks if s.get("Is Confirmed") and s.get("Signal Type") == "BUY"]
+            confirmed_sells = [s for s in all_scanned_stocks if s.get("Is Confirmed") and s.get("Signal Type") == "SELL"]
 
-            ranked_results, df = self._rank_signals(detected_signals)
+            # Sort confirmed lists by Signal Score DESC, then newest crossover timestamp
+            confirmed_buys.sort(key=lambda x: (x.get("Signal Score", 0.0), x.get("Crossover Timestamp", "")), reverse=True)
+            confirmed_sells.sort(key=lambda x: (x.get("Signal Score", 0.0), x.get("Crossover Timestamp", "")), reverse=True)
 
-            self.latest_dataframe = df
-            self.latest_results = ranked_results
-            self.signals_found = len(ranked_results)
+            # Assign alert ranks 1..N
+            for idx, item in enumerate(confirmed_buys, start=1):
+                item["Alert Rank"] = idx
+            for idx, item in enumerate(confirmed_sells, start=1):
+                item["Alert Rank"] = idx
 
-            # Step 4: Persist results in PostgreSQL / Database
-            for item in ranked_results:
-                result_entry = ScanResult(
+            # Sort all stocks: first confirmed alerts, then by Signal Score DESC
+            all_scanned_stocks.sort(key=lambda x: (x.get("Is Confirmed", False), x.get("Signal Score", 0.0)), reverse=True)
+
+            self.confirmed_buy_alerts = confirmed_buys
+            self.confirmed_sell_alerts = confirmed_sells
+            self.latest_results = all_scanned_stocks
+            self.signals_found = len(confirmed_buys) + len(confirmed_sells)
+
+            # Step 4: Persist results in Database
+            for item in all_scanned_stocks:
+                scan_res = ScanResult(
                     scan_id=scan_run.id,
-                    rank=item["Rank"],
+                    rank=item.get("Activity Rank", 0),
                     symbol=item["Symbol"],
                     company=item["Company"],
-                    signal_type=item["Signal Type"],
-                    crossover_date=item["Crossover Date"],
-                    close=item["Close"],
-                    sma6=item["SMA 6"],
-                    sma30=item["SMA 30"]
+                    signal_type=item.get("Signal Type", "WATCH"),
+                    crossover_date=str(item.get("Crossover Timestamp", "")),
+                    close=float(item.get("Close", 0.0)),
+                    sma6=float(item.get("SMA 6", 0.0)),
+                    sma30=float(item.get("SMA 30", 0.0)),
+                    rel_volume=float(item.get("Relative Volume", 1.0)),
+                    change_pct=float(item.get("Change Pct", 0.0)),
+                    cumulative_volume=int(item.get("Cumulative Volume", 0)),
+                    traded_value=float(item.get("Traded Value Cr", 0.0) * 10000000.0),
+                    signal_score=float(item.get("Signal Score", 0.0)),
+                    is_confirmed=bool(item.get("Is Confirmed", False)),
+                    confirmation_notes=str(item.get("Confirmation Notes", "")),
+                    status=str(item.get("Status", "WATCH")),
+                    candle_timestamp=str(item.get("Candle Timestamp", "")),
+                    freshness=str(item.get("Freshness", "ACTIVE"))
                 )
-                db.add(result_entry)
+                db.add(scan_res)
 
-            scan_run.status = "completed"
             scan_run.completed_at = datetime.now(timezone.utc)
             scan_run.stocks_scanned = self.stocks_scanned
             scan_run.signals_found = self.signals_found
+            scan_run.status = "completed"
             db.commit()
 
-            # Execute cleanup policy
-            cleanup_old_scans(db, keep_count=1, delete_all=settings.DELETE_RESULTS_AFTER_SCAN)
+            # Retention policy cleanup
+            if settings.DELETE_RESULTS_AFTER_SCAN:
+                cleanup_old_scans(db, keep_count=0, delete_all=True)
+            else:
+                cleanup_old_scans(db, keep_count=3)
 
-            self.status = "completed"
-            self.progress_message = f"Completed: Scanned {self.stocks_scanned} stocks, found {self.signals_found} confirmed crossovers."
+            self.progress_message = f"Scan complete. Evaluated {self.stocks_scanned} stocks. Generated {len(confirmed_buys)} Confirmed BUY & {len(confirmed_sells)} Confirmed SELL alerts."
             logger.info(self.progress_message)
             return self.latest_results
 
@@ -264,160 +343,4 @@ class ScannerManager:
             self.is_running = False
             db.close()
 
-    def _detect_crossover(
-        self,
-        symbol: str,
-        company: str,
-        candles: List[List[Any]]
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Calculates SMA 6 and SMA 30 on daily candles.
-        Detects the most recent confirmed crossover:
-        - Bullish Golden Cross: prev(SMA6) <= prev(SMA30) and curr(SMA6) > curr(SMA30) -> BULLISH
-        - Bearish Death Cross:  prev(SMA6) >= prev(SMA30) and curr(SMA6) < curr(SMA30) -> BEARISH
-
-        Fixes logical errors:
-        1. Accurately reports true CURRENT CLOSE (LTP), CURRENT SMA 6, and CURRENT SMA 30.
-        2. Validates that current trend has not reversed (invalidation check).
-        3. Enforces an active lookback window (up to 25 trading days) to eliminate stale ancient crossovers.
-        4. Provides Crossover Price, Days Ago, Freshness, and Spread %.
-        """
-        # Upstox returns candles [timestamp, open, high, low, close, volume, oi] with newest first
-        # Reverse to chronological order (oldest to newest)
-        chronological_candles = candles[::-1]
-
-        df = pd.DataFrame(chronological_candles, columns=["timestamp", "open", "high", "low", "close", "volume", "oi"])
-        df["close"] = pd.to_numeric(df["close"], errors="coerce")
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
-
-        # Calculate SMA 6 and SMA 30
-        df["sma6"] = df["close"].rolling(window=6).mean()
-        df["sma30"] = df["close"].rolling(window=30).mean()
-
-        n = len(df)
-        if n < 31:
-            return None
-
-        # Latest live market values
-        latest_close = float(df.at[n - 1, "close"])
-        latest_sma6 = float(df.at[n - 1, "sma6"])
-        latest_sma30 = float(df.at[n - 1, "sma30"])
-
-        if pd.isna(latest_close) or pd.isna(latest_sma6) or pd.isna(latest_sma30):
-            return None
-
-        # Lookback limit of 25 trading days
-        min_lookback = max(29, n - 26)
-
-        for i in range(n - 1, min_lookback, -1):
-            prev_s6 = df.at[i - 1, "sma6"]
-            prev_s30 = df.at[i - 1, "sma30"]
-            curr_s6 = df.at[i, "sma6"]
-            curr_s30 = df.at[i, "sma30"]
-
-            if pd.isna(prev_s6) or pd.isna(prev_s30) or pd.isna(curr_s6) or pd.isna(curr_s30):
-                continue
-
-            days_ago = (n - 1) - i
-
-            # Bullish Golden Crossover
-            if prev_s6 <= prev_s30 and curr_s6 > curr_s30:
-                # Invalidation check: Today's SMA6 must still be >= SMA30 for trend to remain active
-                if latest_sma6 < latest_sma30:
-                    continue
-                # Accuracy check: Current price must not be collapsed below SMA 30 (whipsaw filter)
-                if latest_close < latest_sma30 * 0.97:
-                    continue
-
-                crossover_date = df.at[i, "timestamp"].strftime("%Y-%m-%d")
-                crossover_price = round(float(df.at[i, "close"]), 2)
-                spread_pct = round(((latest_sma6 - latest_sma30) / latest_sma30) * 100, 2)
-                freshness = "FRESH" if days_ago <= 1 else ("RECENT" if days_ago <= 5 else "ACTIVE")
-
-                return {
-                    "Symbol": symbol,
-                    "Company": company,
-                    "Signal Type": "BULLISH",
-                    "Crossover Date": crossover_date,
-                    "Close": round(latest_close, 2),        # TRUE CURRENT CLOSE (LTP)
-                    "SMA 6": round(latest_sma6, 2),          # TRUE CURRENT SMA 6
-                    "SMA 30": round(latest_sma30, 2),        # TRUE CURRENT SMA 30
-                    "Crossover Price": crossover_price,      # Price at crossover
-                    "Days Ago": days_ago,
-                    "Freshness": freshness,
-                    "Spread Pct": spread_pct,
-                    "_sort_date": df.at[i, "timestamp"]
-                }
-
-            # Bearish Death Crossover
-            if prev_s6 >= prev_s30 and curr_s6 < curr_s30:
-                # Invalidation check: Today's SMA6 must still be <= SMA30 for trend to remain active
-                if latest_sma6 > latest_sma30:
-                    continue
-                # Accuracy check: Current price must not be rebounded above SMA 30 (whipsaw filter)
-                if latest_close > latest_sma30 * 1.03:
-                    continue
-
-                crossover_date = df.at[i, "timestamp"].strftime("%Y-%m-%d")
-                crossover_price = round(float(df.at[i, "close"]), 2)
-                spread_pct = round(((latest_sma6 - latest_sma30) / latest_sma30) * 100, 2)
-                freshness = "FRESH" if days_ago <= 1 else ("RECENT" if days_ago <= 5 else "ACTIVE")
-
-                return {
-                    "Symbol": symbol,
-                    "Company": company,
-                    "Signal Type": "BEARISH",
-                    "Crossover Date": crossover_date,
-                    "Close": round(latest_close, 2),        # TRUE CURRENT CLOSE (LTP)
-                    "SMA 6": round(latest_sma6, 2),          # TRUE CURRENT SMA 6
-                    "SMA 30": round(latest_sma30, 2),        # TRUE CURRENT SMA 30
-                    "Crossover Price": crossover_price,      # Price at crossover
-                    "Days Ago": days_ago,
-                    "Freshness": freshness,
-                    "Spread Pct": spread_pct,
-                    "_sort_date": df.at[i, "timestamp"]
-                }
-
-        return None
-
-    def _rank_signals(self, signals: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], pd.DataFrame]:
-        """
-        Sorts combined bullish & bearish signals by crossover_date DESC,
-        assigns ranks 1..N, and returns both list of dicts and formatted Pandas DataFrame.
-        """
-        if not signals:
-            empty_df = pd.DataFrame(columns=[
-                "Rank", "Symbol", "Company", "Signal Type", "Crossover Date", "Close", "SMA 6", "SMA 30"
-            ])
-            return [], empty_df
-
-        # Sort by crossover date DESC, then symbol ASC
-        signals.sort(key=lambda s: (s.get("_sort_date", datetime.min), s["Symbol"]), reverse=True)
-
-        ranked: List[Dict[str, Any]] = []
-        for idx, item in enumerate(signals, start=1):
-            entry = {
-                "Rank": idx,
-                "Symbol": item["Symbol"],
-                "Company": item["Company"],
-                "Signal Type": item["Signal Type"],
-                "Crossover Date": item["Crossover Date"],
-                "Close": item["Close"],
-                "SMA 6": item["SMA 6"],
-                "SMA 30": item["SMA 30"],
-                "Crossover Price": item.get("Crossover Price", item["Close"]),
-                "Days Ago": item.get("Days Ago", 0),
-                "Freshness": item.get("Freshness", "ACTIVE"),
-                "Spread Pct": item.get("Spread Pct", 0.0)
-            }
-            ranked.append(entry)
-
-        # Output as Pandas DataFrame with the exact specified columns
-        df = pd.DataFrame(ranked)
-        cols = ["Rank", "Symbol", "Company", "Signal Type", "Crossover Date", "Close", "SMA 6", "SMA 30"]
-        df = df[cols]
-
-        return ranked, df
-
 scanner_manager = ScannerManager()
-

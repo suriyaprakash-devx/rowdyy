@@ -85,90 +85,6 @@
   --shadow-elevated: 0 16px 40px -8px rgba(0, 0, 0, 0.8), 0 0 24px rgba(0, 210, 255, 0.15);
 }
 
-[data-theme="light"] {
-  --theme-mode: 'light';
-
-  /* Typography */
-  --font-heading: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
-
-  /* Frosted White Crystal Glass Theme Colors */
-  --bg-canvas: #f1f5f9;
-  --bg-primary: #ffffff;
-  --bg-secondary: #f8fafc;
-  --bg-surface-low: #f8fafc;
-  --bg-surface-card: rgba(255, 255, 255, 0.75);
-  --bg-surface-card-hover: rgba(255, 255, 255, 0.92);
-  --bg-surface-high: rgba(241, 245, 249, 0.88);
-  --bg-surface-highest: #e2e8f0;
-  --bg-input: rgba(255, 255, 255, 0.9);
-  --bg-header: rgba(255, 255, 255, 0.82);
-  --bg-surface-modal: rgba(255, 255, 255, 0.97);
-
-  /* Glass Borders & Accents */
-  --border-subtle: rgba(15, 23, 42, 0.08);
-  --border-medium: rgba(15, 23, 42, 0.14);
-  --border-active: rgba(2, 132, 199, 0.55);
-  --border-glow: rgba(16, 185, 129, 0.4);
-
-  /* Typography Colors */
-  --text-main: #0f172a;
-  --text-sub: #334155;
-  --text-muted: #64748b;
-  --text-faint: #94a3b8;
-  --text-outline: #475569;
-
-  /* Accents */
-  --accent-cyan: #0284c7;
-  --accent-cyan-dim: #0369a1;
-  --accent-blue: #2563eb;
-  --accent-indigo: #4f46e5;
-
-  /* Crossover Signals: Golden Cross (Bullish) */
-  --bullish-base: #059669;
-  --bullish-neon: #059669;
-  --bullish-bg: rgba(16, 185, 129, 0.14);
-  --bullish-border: rgba(16, 185, 129, 0.42);
-  --bullish-text: #059669;
-  --bullish-glow: 0 0 16px rgba(16, 185, 129, 0.2);
-
-  /* Crossover Signals: Death Cross (Bearish) */
-  --bearish-base: #e11d48;
-  --bearish-neon: #e11d48;
-  --bearish-bg: rgba(225, 29, 72, 0.14);
-  --bearish-border: rgba(225, 29, 72, 0.42);
-  --bearish-text: #e11d48;
-  --bearish-glow: 0 0 16px rgba(225, 29, 72, 0.2);
-
-  /* Warning / Neutral */
-  --warning-bg: rgba(217, 119, 6, 0.14);
-  --warning-text: #d97706;
-  --warning-border: rgba(217, 119, 6, 0.42);
-
-  /* Glassmorphism Specs */
-  --glass-specular: inset 0 1px 0 rgba(255, 255, 255, 0.95), 0 1px 3px rgba(0, 0, 0, 0.05);
-  --glass-shadow: 0 12px 36px rgba(31, 38, 135, 0.08);
-  --table-header-bg: rgba(241, 245, 249, 0.9);
-  --table-header-strip-bg: rgba(248, 250, 252, 0.85);
-  --table-border-row: rgba(0, 0, 0, 0.06);
-  --table-hover-row: rgba(2, 132, 199, 0.06);
-  --perfection-hero-bg: linear-gradient(135deg, rgba(255, 255, 255, 0.92) 0%, rgba(248, 250, 252, 0.96) 100%);
-  --modal-bg: rgba(255, 255, 255, 0.97);
-  --search-box-bg: rgba(255, 255, 255, 0.92);
-
-  /* Radius & Shadows */
-  --radius-xs: 4px;
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 16px;
-  --radius-xl: 20px;
-  --radius-full: 9999px;
-
-  --shadow-card: 0 8px 30px rgba(0, 0, 0, 0.07), 0 2px 6px rgba(0, 0, 0, 0.04);
-  --shadow-elevated: 0 16px 40px rgba(0, 0, 0, 0.12), 0 0 20px rgba(2, 132, 199, 0.1);
-}
-
 * {
   box-sizing: border-box;
   margin: 0;
@@ -180,13 +96,11 @@ body {
   background-color: var(--bg-canvas);
   color: var(--text-main);
   min-height: 100vh;
-  transition: background-color 0.3s ease, color 0.3s ease;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Background Gradients for Black Glass */
-[data-theme="dark"] body,
+/* Background Gradients for Obsidian Black Glass */
 body {
   background-image:
     radial-gradient(circle at 10% 10%, rgba(0, 210, 255, 0.06) 0%, transparent 45%),
@@ -194,18 +108,6 @@ body {
     radial-gradient(circle at 50% 90%, rgba(99, 102, 241, 0.05) 0%, transparent 50%),
     linear-gradient(to right, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
     linear-gradient(to bottom, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
-  background-size: auto, auto, auto, 32px 32px, 32px 32px;
-  background-attachment: fixed;
-}
-
-/* Background Gradients for White Glass */
-[data-theme="light"] body {
-  background-image:
-    radial-gradient(circle at 10% 10%, rgba(2, 132, 199, 0.08) 0%, transparent 45%),
-    radial-gradient(circle at 90% 15%, rgba(16, 185, 129, 0.08) 0%, transparent 40%),
-    radial-gradient(circle at 50% 90%, rgba(99, 102, 241, 0.06) 0%, transparent 50%),
-    linear-gradient(to right, rgba(0, 0, 0, 0.03) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(0, 0, 0, 0.03) 1px, transparent 1px);
   background-size: auto, auto, auto, 32px 32px, 32px 32px;
   background-attachment: fixed;
 }

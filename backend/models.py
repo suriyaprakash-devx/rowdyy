@@ -40,11 +40,21 @@ class ScanResult(Base):
     rank = Column(Integer, nullable=False)
     symbol = Column(String(50), nullable=False, index=True)
     company = Column(String(250), nullable=False)
-    signal_type = Column(String(20), nullable=False)  # BULLISH / BEARISH
-    crossover_date = Column(String(20), nullable=False)  # YYYY-MM-DD
+    signal_type = Column(String(50), nullable=False)  # BUY / SELL / WATCH / UNCONFIRMED
+    crossover_date = Column(String(50), nullable=False)  # Timestamp or date
     close = Column(Float, nullable=False)
     sma6 = Column(Float, nullable=False)
     sma30 = Column(Float, nullable=False)
+    rel_volume = Column(Float, default=1.0, nullable=True)
+    change_pct = Column(Float, default=0.0, nullable=True)
+    cumulative_volume = Column(Integer, default=0, nullable=True)
+    traded_value = Column(Float, default=0.0, nullable=True)
+    signal_score = Column(Float, default=0.0, nullable=True)
+    is_confirmed = Column(Boolean, default=False, nullable=False)
+    confirmation_notes = Column(Text, nullable=True)
+    status = Column(String(20), default="WATCH", nullable=False)
+    candle_timestamp = Column(String(50), nullable=True)
+    freshness = Column(String(20), default="ACTIVE", nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
     scan_run = relationship("ScanRun", back_populates="results")
