@@ -4,6 +4,10 @@
 FROM node:20-alpine AS frontend-builder
 WORKDIR /app/frontend
 
+# Support optional external API URL at build time (defaults to relative /api for unified hosting)
+ARG VITE_API_URL=""
+ENV VITE_API_URL=$VITE_API_URL
+
 # Copy frontend package descriptors and install dependencies
 COPY frontend/package*.json ./
 RUN npm ci

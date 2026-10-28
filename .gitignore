@@ -30,6 +30,8 @@ data/*.json
 !data/.gitkeep
 !data/nse_fundamentals_database.json
 !data/scanner_data_cache.json
+!data/nifty500_constituents.json
+!data/upstox_nse_eq_instruments.json
 *.log
 
 

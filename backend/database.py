@@ -35,8 +35,15 @@ def get_db():
         db.close()
 
 def init_db():
+    global engine, SessionLocal
     import backend.models  # noqa: F401
-    Base.metadata.create_all(bind=engine)
+    try:
+        Base.metadata.create_all(bind=engine)
+    except Exception as e:
+        logger.error(f"Database initialization error on URL: {e}. Falling back to SQLite scanner.db.")
+        engine = create_engine("sqlite:///./data/scanner.db", connect_args={"check_same_thread": False})
+        SessionLocal.configure(bind=engine)
+        Base.metadata.create_all(bind=engine)
     
     # Safe migration: ensure new columns exist in scan_results
     try:
