@@ -33,7 +33,8 @@ import {
   History,
   Copy,
   ExternalLink,
-  FileText
+  FileText,
+  ArrowUpDown
 } from 'lucide-react'
 import './AlgoSignals.css'
 
@@ -133,11 +134,12 @@ function InteractiveCandleChart({ history = [], currentPrice = 0, symbol = '' })
   // Area Path
   const areaPath = useMemo(() => {
     if (validHistory.length === 0) return ''
-    const points = validHistory.map((d, i) => `${xAt(i).toFixed(1)} ${yAtPrice(d.close).toFixed(1)}`)
+    const pts = validHistory.map((d, i) => `${xAt(i).toFixed(1)} ${yAtPrice(d.close).toFixed(1)}`)
     const firstX = xAt(0).toFixed(1)
     const lastX = xAt(validHistory.length - 1).toFixed(1)
     const baseY = (pad.top + priceH).toFixed(1)
-    return `M ${points.join(' L ')} L ${lastX} ${baseY} L ${firstX} ${baseY} Z`
+    if (pts.length === 0) return ''
+    return `M ${pts[0]} L ${pts.slice(1).join(' L ')} L ${lastX} ${baseY} L ${firstX} ${baseY} Z`
   }, [validHistory, minPrice, maxPrice])
 
   // Price Gridlines (4 levels)
@@ -573,7 +575,7 @@ function InteractiveEquityCurve({ returns = [] }) {
               />
               <circle
                 cx={xAt(hoverIndex)}
-                cy={yAt(returns[hoverIndex])}
+                cy={yAt(validReturns[hoverIndex])}
                 r={4}
                 fill={isPositive ? '#10b981' : '#ef4444'}
                 stroke="#fff"
@@ -593,8 +595,8 @@ function InteractiveEquityCurve({ returns = [] }) {
 
         {hoverIndex !== null && (
           <div className="equity-hud-tooltip font-mono">
-            Trade #{hoverIndex + 1}: <b className={returns[hoverIndex] >= 0 ? 'text-bullish-neon' : 'text-bearish-neon'}>
-              {returns[hoverIndex] >= 0 ? '+' : ''}{returns[hoverIndex].toFixed(2)}%
+            Trade #{hoverIndex + 1}: <b className={validReturns[hoverIndex] >= 0 ? 'text-bullish-neon' : 'text-bearish-neon'}>
+              {validReturns[hoverIndex] >= 0 ? '+' : ''}{validReturns[hoverIndex].toFixed(2)}%
             </b>
           </div>
         )}
@@ -674,15 +676,17 @@ Auto Square-Off : 15:15 IST
   const handleCopyTicket = async () => {
     try {
       await navigator.clipboard.writeText(ticketFormattedText)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2500)
     } catch {
+      // Legacy fallback for browsers without clipboard API
       const ta = document.createElement('textarea')
       ta.value = ticketFormattedText
+      ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0'
       document.body.appendChild(ta)
+      ta.focus()
       ta.select()
-      document.execCommand('copy')
+      try { document.execCommand('copy') } catch (_e) {}
       document.body.removeChild(ta)
+    } finally {
       setCopied(true)
       setTimeout(() => setCopied(false), 2500)
     }
@@ -910,7 +914,7 @@ export default function AlgoSignals({ apiBase = '', initialSymbol = 'RELIANCE' }
     if (loading) {
       setLoadingStep(0)
       interval = setInterval(() => {
-        setLoadingStep(prev => (prev + 1) % 4)
+        setLoadingStep(prev => (prev + 1) % loadingMessages.length)
       }, 2000)
     }
     return () => {
@@ -970,14 +974,26 @@ export default function AlgoSignals({ apiBase = '', initialSymbol = 'RELIANCE' }
     }
   }
 
-  // Auto-fetch analysis on mount or when symbol changes
+  // Track previous initialSymbol to avoid infinite re-fetches
+  const prevInitSymRef = useRef(null)
+
+  // Auto-fetch analysis on mount or when parent navigates to a new symbol
   useEffect(() => {
-    const sym = (initialSymbol && initialSymbol.trim()) ? initialSymbol.trim().toUpperCase() : (symbol || 'RELIANCE')
-    if (!data && !loading) {
-      fetchAnalysis(sym)
-    } else if (initialSymbol && initialSymbol.trim() && initialSymbol.trim().toUpperCase() !== symbol.toUpperCase()) {
-      fetchAnalysis(initialSymbol.trim().toUpperCase())
+    const cleanSym = (initialSymbol && initialSymbol.trim())
+      ? initialSymbol.trim().toUpperCase()
+      : 'RELIANCE'
+    if (!data && !loading && prevInitSymRef.current !== cleanSym) {
+      prevInitSymRef.current = cleanSym
+      fetchAnalysis(cleanSym)
+    } else if (
+      cleanSym &&
+      prevInitSymRef.current !== cleanSym &&
+      cleanSym !== symbol.toUpperCase()
+    ) {
+      prevInitSymRef.current = cleanSym
+      fetchAnalysis(cleanSym)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialSymbol])
 
   const handleSearchSubmit = (e) => {
@@ -1050,13 +1066,53 @@ export default function AlgoSignals({ apiBase = '', initialSymbol = 'RELIANCE' }
     return currentConditions
   }, [currentConditions, checkFilter])
 
-  // Filtered Backtest Trades
+  // Filtered and Sorted Backtest Trades
+  const [tradeSortField, setTradeSortField] = useState('date')
+  const [tradeSortDir, setTradeSortDir] = useState('desc')
+
+  const handleTradeSort = (field) => {
+    if (tradeSortField === field) {
+      setTradeSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setTradeSortField(field)
+      setTradeSortDir('desc')
+    }
+  }
+
   const filteredTrades = useMemo(() => {
     if (!data?.backtest?.trades) return []
     if (tradeFilter === 'won') return data.backtest.trades.filter(t => t.won)
     if (tradeFilter === 'lost') return data.backtest.trades.filter(t => !t.won)
     return data.backtest.trades
   }, [data, tradeFilter])
+
+  const sortedTrades = useMemo(() => {
+    let list = [...filteredTrades]
+    list.sort((a, b) => {
+      let valA, valB
+      if (tradeSortField === 'return_pct') {
+        valA = Number(a.return_pct ?? a.pnl_pct ?? 0)
+        valB = Number(b.return_pct ?? b.pnl_pct ?? 0)
+      } else if (tradeSortField === 'entry') {
+        valA = Number(a.entry ?? a.entry_price ?? 0)
+        valB = Number(b.entry ?? b.entry_price ?? 0)
+      } else if (tradeSortField === 'exit') {
+        valA = Number(a.exit ?? a.exit_price ?? 0)
+        valB = Number(b.exit ?? b.exit_price ?? 0)
+      } else if (tradeSortField === 'prob') {
+        valA = Number(a.ai_prob ?? 0)
+        valB = Number(b.ai_prob ?? 0)
+      } else {
+        valA = a.date || a.entry_date || ''
+        valB = b.date || b.entry_date || ''
+      }
+      if (typeof valA === 'string') {
+        return tradeSortDir === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA)
+      }
+      return tradeSortDir === 'asc' ? valA - valB : valB - valA
+    })
+    return list
+  }, [filteredTrades, tradeSortField, tradeSortDir])
 
   return (
     <div className="algo-swing-container">
@@ -1098,10 +1154,10 @@ export default function AlgoSignals({ apiBase = '', initialSymbol = 'RELIANCE' }
                 </button>
                 <button
                   type="button"
-                  className={`timeframe-toggle-btn ${timeframe === 'daily' ? 'active' : ''}`}
+                  className={`timeframe-toggle-btn ${timeframe === 'swing' ? 'active' : ''}`}
                   onClick={() => {
-                    setTimeframe('daily')
-                    if (symbol) fetchAnalysis(symbol, false, 'daily')
+                    setTimeframe('swing')
+                    if (symbol) fetchAnalysis(symbol, false, 'swing')
                   }}
                 >
                   <Calendar size={13} />
@@ -1346,7 +1402,7 @@ export default function AlgoSignals({ apiBase = '', initialSymbol = 'RELIANCE' }
             <div className="telemetry-chip">
               <span className="chip-label">RSI (14)</span>
               <span className="chip-val font-mono">
-                {(data.intraday_telemetry?.rsi_14 || data.indicators?.rsi_14 || 50).toFixed(1)}
+                {((data.intraday_telemetry?.rsi_14 ?? data.indicators?.rsi_14 ?? 50)).toFixed(1)}
               </span>
               <span className="chip-sub font-mono">Momentum</span>
             </div>
@@ -1931,16 +1987,41 @@ export default function AlgoSignals({ apiBase = '', initialSymbol = 'RELIANCE' }
                   <table className="algo-trades-table">
                     <thead>
                       <tr>
-                        <th>Date</th>
-                        <th>Entry Price</th>
-                        <th>Exit Price (5D)</th>
-                        <th>AI Probability</th>
+                        <th onClick={() => handleTradeSort('date')} style={{ cursor: 'pointer', userSelect: 'none' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <span>Date</span>
+                            <ArrowUpDown size={11} />
+                          </div>
+                        </th>
+                        <th onClick={() => handleTradeSort('entry')} style={{ cursor: 'pointer', userSelect: 'none' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <span>Entry Price</span>
+                            <ArrowUpDown size={11} />
+                          </div>
+                        </th>
+                        <th onClick={() => handleTradeSort('exit')} style={{ cursor: 'pointer', userSelect: 'none' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <span>Exit Price</span>
+                            <ArrowUpDown size={11} />
+                          </div>
+                        </th>
+                        <th onClick={() => handleTradeSort('prob')} style={{ cursor: 'pointer', userSelect: 'none' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <span>AI Probability</span>
+                            <ArrowUpDown size={11} />
+                          </div>
+                        </th>
                         <th>Outcome</th>
-                        <th style={{ textAlign: 'right' }}>Return %</th>
+                        <th onClick={() => handleTradeSort('return_pct')} style={{ cursor: 'pointer', userSelect: 'none', textAlign: 'right' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '4px' }}>
+                            <span>Return %</span>
+                            <ArrowUpDown size={11} />
+                          </div>
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredTrades.map((t, idx) => {
+                      {sortedTrades.map((t, idx) => {
                         const entryVal = Number(t.entry ?? t.entry_price ?? 0)
                         const exitVal = Number(t.exit ?? t.exit_price ?? 0)
                         const retVal = Number(t.return_pct ?? t.pnl_pct ?? 0)

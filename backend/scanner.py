@@ -321,7 +321,7 @@ class ScannerManager:
 
             # Retention policy cleanup
             if settings.DELETE_RESULTS_AFTER_SCAN:
-                cleanup_old_scans(db, keep_count=0, delete_all=True)
+                cleanup_old_scans(db, keep_count=1)
             else:
                 cleanup_old_scans(db, keep_count=3)
 

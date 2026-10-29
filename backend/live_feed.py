@@ -186,24 +186,34 @@ async def get_intraday_10m_candles_fallback(symbol: str, min_candles: int = 35) 
                             "volume": int(volumes[i] or 0)
                         })
 
-                # Aggregate pairs of 5m bars into 10m bars
+                # Group 5m bars strictly by calendar day to prevent cross-session blending
+                from collections import defaultdict
+                day_buckets = defaultdict(list)
+                for b in raw_5m:
+                    b_dt = datetime.fromtimestamp(b["ts"], tz=timezone(timedelta(hours=5, minutes=30)))
+                    day_buckets[b_dt.date()].append(b)
+
                 candles_10m = []
-                for i in range(0, len(raw_5m) - 1, 2):
-                    b1 = raw_5m[i]
-                    b2 = raw_5m[i + 1]
-                    # IST timestamp
-                    dt = datetime.fromtimestamp(b1["ts"], tz=timezone(timedelta(hours=5, minutes=30)))
-                    ts_str = dt.strftime("%Y-%m-%dT%H:%M:%S+05:30")
-                    o = b1["open"]
-                    h = max(b1["high"], b2["high"])
-                    l = min(b1["low"], b2["low"])
-                    c = b2["close"]
-                    v = b1["volume"] + b2["volume"]
-                    candles_10m.append([ts_str, round(o, 2), round(h, 2), round(l, 2), round(c, 2), v, 0])
+                for d_key in sorted(day_buckets.keys()):
+                    d_bars = day_buckets[d_key]
+                    for i in range(0, len(d_bars) - 1, 2):
+                        b1 = d_bars[i]
+                        b2 = d_bars[i + 1]
+                        dt = datetime.fromtimestamp(b1["ts"], tz=timezone(timedelta(hours=5, minutes=30)))
+                        ts_str = dt.strftime("%Y-%m-%dT%H:%M:%S+05:30")
+                        o = b1["open"]
+                        h = max(b1["high"], b2["high"])
+                        l = min(b1["low"], b2["low"])
+                        c = b2["close"]
+                        v = b1["volume"] + b2["volume"]
+                        candles_10m.append([ts_str, round(o, 2), round(h, 2), round(l, 2), round(c, 2), v, 0])
 
                 # Return newest first to match Upstox candle format
                 candles_10m.reverse()
                 if candles_10m:
+                    if len(_INTRADAY_CANDLE_CACHE) >= 100 and clean_sym not in _INTRADAY_CANDLE_CACHE:
+                        oldest = min(_INTRADAY_CANDLE_CACHE.keys(), key=lambda k: _INTRADAY_CANDLE_CACHE[k][0])
+                        _INTRADAY_CANDLE_CACHE.pop(oldest, None)
                     _INTRADAY_CANDLE_CACHE[clean_sym] = (now, candles_10m)
                 return candles_10m
     except Exception as e:

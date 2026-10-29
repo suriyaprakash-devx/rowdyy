@@ -1918,3 +1918,173 @@
 }
 
 
+
+/* ========================================================================= */
+/* QUANTITATIVE ENHANCEMENTS: MINI METERS, RELVOL BADGES, TOASTS & EMPTY STATE */
+/* ========================================================================= */
+
+/* Signal score mini progress bar in table */
+.score-cell-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: center;
+}
+.score-bar-track {
+  width: 58px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.score-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+.score-bar-bullish {
+  background: linear-gradient(90deg, #10b981 0%, #00f5a0 100%);
+  box-shadow: 0 0 6px rgba(0, 245, 160, 0.4);
+}
+.score-bar-bearish {
+  background: linear-gradient(90deg, #ef4444 0%, #ff3366 100%);
+  box-shadow: 0 0 6px rgba(255, 51, 102, 0.4);
+}
+.score-bar-neutral {
+  background: linear-gradient(90deg, #00d2ff 0%, #3b82f6 100%);
+}
+
+/* Relative volume coloring badge */
+.rel-vol-high {
+  color: var(--bullish-neon);
+  font-weight: 700;
+  background: rgba(0, 245, 160, 0.12);
+  border: 1px solid rgba(0, 245, 160, 0.3);
+  padding: 2px 7px;
+  border-radius: 4px;
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
+.rel-vol-normal {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 2px 7px;
+  border-radius: 4px;
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
+.rel-vol-low {
+  color: #94a3b8;
+  opacity: 0.75;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
+
+/* Table Empty State */
+.table-empty-state {
+  padding: 50px 24px;
+  text-align: center;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(10, 16, 26, 0.4);
+}
+.table-empty-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-medium);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-cyan);
+  margin-bottom: 4px;
+}
+.table-empty-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text-main);
+}
+.table-empty-desc {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  max-width: 420px;
+  line-height: 1.5;
+}
+
+/* Floating Auto-dismiss Toast Notifications */
+.toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+  max-width: 420px;
+}
+.toast-pill {
+  pointer-events: auto;
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.84rem;
+  font-weight: 600;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65), 0 0 16px rgba(0, 210, 255, 0.1);
+  animation: toastSlideIn 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: all 0.2s ease;
+}
+@keyframes toastSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(30px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+.toast-success {
+  background: rgba(5, 28, 20, 0.94);
+  border: 1px solid rgba(0, 245, 160, 0.4);
+  color: var(--bullish-text);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.65), 0 0 20px rgba(0, 245, 160, 0.2);
+}
+.toast-error {
+  background: rgba(36, 10, 18, 0.94);
+  border: 1px solid rgba(255, 51, 102, 0.4);
+  color: var(--bearish-text);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.65), 0 0 20px rgba(255, 51, 102, 0.2);
+}
+.toast-info {
+  background: rgba(10, 24, 40, 0.94);
+  border: 1px solid rgba(0, 210, 255, 0.4);
+  color: var(--accent-cyan);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.65), 0 0 20px rgba(0, 210, 255, 0.2);
+}
+.toast-close-btn {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+.toast-close-btn:hover {
+  opacity: 1;
+}

@@ -42,6 +42,7 @@ ATR_TG2_MULT          = 3.0 # Target 2 = ATR * 3.0
 
 _INTRADAY_CACHE: Dict[str, Dict[str, Any]] = {}
 CACHE_TTL = 180  # 3 minutes cache for live intraday scans
+CACHE_MAX_SIZE = 50  # Maximum symbols held in memory
 
 
 def calculate_intraday_vwap(df: pd.DataFrame) -> pd.Series:
@@ -98,6 +99,8 @@ def expand_daily_to_intraday(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     Expands daily bars into realistic 10-minute intraday bars (session 09:15 to 15:30 IST)
     preserving daily high, low, open, close, and volume.
     """
+    seed = sum(ord(c) for c in symbol.strip().upper())
+    rng = np.random.default_rng(seed)
     rows = []
     for date, row in df.tail(10).iterrows():
         o = float(row.get("Open", 100.0))
@@ -111,7 +114,7 @@ def expand_daily_to_intraday(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
         n_bars = 25
         base_curve = np.linspace(o, c, n_bars)
-        noise = np.random.normal(0, max(0.05, (h - l) * 0.08), n_bars)
+        noise = rng.normal(0, max(0.05, (h - l) * 0.08), n_bars)
         prices = np.clip(base_curve + noise, l, h)
         prices[0] = o
         prices[-1] = c
@@ -120,10 +123,10 @@ def expand_daily_to_intraday(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
         for i, p in enumerate(prices):
             bar_time = pd.to_datetime(f"{d_str} 09:15:00") + pd.Timedelta(minutes=i * 10)
             bar_o = float(p if i == 0 else prices[i - 1])
-            bar_h = float(max(bar_o, p, min(h, p + np.random.uniform(0, max(0.1, (h - l) * 0.04)))))
-            bar_l = float(min(bar_o, p, max(l, p - np.random.uniform(0, max(0.1, (h - l) * 0.04)))))
+            bar_h = float(max(bar_o, p, min(h, p + rng.uniform(0, max(0.1, (h - l) * 0.04)))))
+            bar_l = float(min(bar_o, p, max(l, p - rng.uniform(0, max(0.1, (h - l) * 0.04)))))
             bar_c = float(p)
-            bar_v = float(max(100, int((vol / n_bars) * np.random.uniform(0.6, 1.4))))
+            bar_v = float(max(100, int((vol / n_bars) * rng.uniform(0.6, 1.4))))
             rows.append({
                 "Datetime": bar_time,
                 "Open": bar_o,
@@ -143,7 +146,7 @@ def generate_synthetic_intraday_candles(symbol: str) -> pd.DataFrame:
     """
     clean_sym = symbol.strip().upper().replace(".NS", "")
     seed = sum(ord(c) for c in clean_sym)
-    np.random.seed(seed)
+    rng = np.random.default_rng(seed)
     
     base_price = 250.0 + (seed % 2500)
     rows = []
@@ -152,16 +155,16 @@ def generate_synthetic_intraday_candles(symbol: str) -> pd.DataFrame:
     
     for d in dates:
         d_str = d.strftime("%Y-%m-%d")
-        daily_drift = np.random.normal(0.001, 0.015)
+        daily_drift = rng.normal(0.001, 0.015)
         day_open = current_p
         day_close = current_p * (1.0 + daily_drift)
-        day_high = max(day_open, day_close) * (1.0 + np.random.uniform(0.005, 0.02))
-        day_low = min(day_open, day_close) * (1.0 - np.random.uniform(0.005, 0.02))
-        day_vol = float(np.random.randint(400000, 3000000))
+        day_high = max(day_open, day_close) * (1.0 + rng.uniform(0.005, 0.02))
+        day_low = min(day_open, day_close) * (1.0 - rng.uniform(0.005, 0.02))
+        day_vol = float(rng.integers(400000, 3000000))
         
         n_bars = 25
         base_curve = np.linspace(day_open, day_close, n_bars)
-        noise = np.random.normal(0, (day_high - day_low) * 0.08, n_bars)
+        noise = rng.normal(0, (day_high - day_low) * 0.08, n_bars)
         prices = np.clip(base_curve + noise, day_low, day_high)
         prices[0] = day_open
         prices[-1] = day_close
@@ -169,10 +172,10 @@ def generate_synthetic_intraday_candles(symbol: str) -> pd.DataFrame:
         for i, p in enumerate(prices):
             bar_time = pd.to_datetime(f"{d_str} 09:15:00") + pd.Timedelta(minutes=i * 10)
             bar_o = float(p if i == 0 else prices[i - 1])
-            bar_h = float(max(bar_o, p, min(day_high, p + np.random.uniform(0, max(0.1, (day_high - day_low) * 0.03)))))
-            bar_l = float(min(bar_o, p, max(day_low, p - np.random.uniform(0, max(0.1, (day_high - day_low) * 0.03)))))
+            bar_h = float(max(bar_o, p, min(day_high, p + rng.uniform(0, max(0.1, (day_high - day_low) * 0.03)))))
+            bar_l = float(min(bar_o, p, max(day_low, p - rng.uniform(0, max(0.1, (day_high - day_low) * 0.03)))))
             bar_c = float(p)
-            bar_v = float(max(100, int((day_vol / n_bars) * np.random.uniform(0.6, 1.5))))
+            bar_v = float(max(100, int((day_vol / n_bars) * rng.uniform(0.6, 1.5))))
             rows.append({
                 "Datetime": bar_time,
                 "Open": bar_o,
@@ -365,12 +368,22 @@ def run_ai_intraday_analysis(
         if now_ts - cached["timestamp"] < CACHE_TTL:
             return cached["data"]
 
+    # Evict oldest entry to prevent unbounded memory growth
+    if len(_INTRADAY_CACHE) >= CACHE_MAX_SIZE:
+        oldest = min(_INTRADAY_CACHE, key=lambda k: _INTRADAY_CACHE[k]["timestamp"])
+        del _INTRADAY_CACHE[oldest]
+
+    # Evict oldest entry if cache is at capacity
+    if len(_INTRADAY_CACHE) >= CACHE_MAX_SIZE:
+        oldest_key = min(_INTRADAY_CACHE, key=lambda k: _INTRADAY_CACHE[k]["timestamp"])
+        del _INTRADAY_CACHE[oldest_key]
+
     logger.info(f"Running Intraday AI Signal Analysis for {company}...")
 
     df, is_simulated = fetch_intraday_candles(company)
-    warnings = []
+    analysis_warnings = []
     if is_simulated:
-        warnings.append(f"Notice: Historical feed for {company} loaded via benchmark volatility simulation.")
+        analysis_warnings.append(f"Notice: Historical feed for {company} loaded via benchmark volatility simulation.")
     if df is None or len(df) < 20:
         raise ValueError(f"Insufficient intraday candle history for {company}.")
 
@@ -628,6 +641,8 @@ def run_ai_intraday_analysis(
 
     step_size = max(2, len(clean_df) // 25)
     for i in range(15, len(clean_df) - 4, step_size):
+        if i + 3 >= len(clean_df):
+            break
         bar = clean_df.iloc[i]
         future_bar = clean_df.iloc[i + 3]
         bar_price = float(bar["Close"])
@@ -667,6 +682,7 @@ def run_ai_intraday_analysis(
 
     result_payload = {
         "symbol": company,
+        "warnings": analysis_warnings,
         "ticker": f"{company}.NS",
         "timeframe": "10m Intraday",
         "analysis_date": datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d %H:%M IST"),
@@ -790,7 +806,7 @@ def run_ai_intraday_analysis(
             "vwap_distance_pct": round(float(last_row["VWAP_DIST_PCT"]), 2),
             "sma_6": round(sma6_val, 2),
             "sma_30": round(sma30_val, 2),
-            "sma_status": "BULLISH (SMA 6 > SMA 30)" if sma6_val >= sma30_val else "BEARISH (SMA 6 < SMA 30)",
+            "sma_status": "BULLISH (SMA 6 > SMA 30)" if sma6_val > sma30_val else ("NEUTRAL (SMA 6 = SMA 30)" if sma6_val == sma30_val else "BEARISH (SMA 6 < SMA 30)"),
             "rel_vol": round(rel_vol, 2),
             "rsi_14": round(rsi_val, 1),
             "supertrend_direction": "BULLISH" if st_bull else "BEARISH",
@@ -798,7 +814,6 @@ def run_ai_intraday_analysis(
             "session_cutoff": "15:15 IST",
             "timeframe": "10m"
         },
-        "warnings": warnings,
         "recent_history": recent_history,
         "generated_at": datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%H:%M:%S IST")
     }

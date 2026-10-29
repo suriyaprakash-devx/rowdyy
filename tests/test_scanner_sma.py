@@ -513,3 +513,29 @@ def test_intraday_signal_algo_and_order_slip():
     assert bt_res["status"] == "completed"
     assert "win_rate_pct" in bt_res
 
+
+
+def test_swing_signal_algo_and_endpoint():
+    """Test run_ai_swing_analysis and /api/algo/swing-analysis endpoint."""
+    resp = client.get("/api/algo/swing-analysis?symbol=INFY")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("status") == "success"
+    assert data.get("mode") == "swing"
+    assert data["data"]["symbol"] == "INFY"
+    assert "trade_plan" in data["data"]
+    assert "ai_probability" in data["data"]
+    assert "indicators" in data["data"]
+    assert "multi_timeframe" in data["data"]
+
+
+def test_stock_analysis_fundamentals_endpoint():
+    """Test /api/analysis/{symbol} Screener-style fundamental analysis endpoint."""
+    resp = client.get("/api/analysis/TCS")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["symbol"] == "TCS"
+    assert "trailing_pe" in data or "pe_ratio" in data
+    assert "fundamental_score" in data
+    assert "fundamental_verdict" in data
+    assert "strengths" in data

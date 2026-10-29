@@ -145,6 +145,20 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState(null)
   const [successMessage, setSuccessMessage] = useState(null)
 
+  // Floating Toast Notifications state
+  const [toasts, setToasts] = useState([])
+  const addToast = (msg, type = 'info') => {
+    if (!msg) return
+    const id = Date.now() + Math.random().toString(36).substr(2, 4)
+    setToasts(prev => [...prev, { id, message: msg, type }])
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id))
+    }, 4500)
+  }
+  const removeToast = (id) => {
+    setToasts(prev => prev.filter(t => t.id !== id))
+  }
+
   // Bhavcopy & Liquidity Research State
   const [showBhavcopyModal, setShowBhavcopyModal] = useState(false)
   const [bhavcopyData, setBhavcopyData] = useState(null)
@@ -163,6 +177,28 @@ export default function App() {
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000)
     return () => clearInterval(timer)
+  }, [])
+
+  // Dismiss modals with ESC key
+  useEffect(() => {
+    const handleEsc = (e) => {
+      if (e.key === 'Escape') {
+        setSelectedStock(null)
+        setShowBacktestModal(false)
+        setShowBhavcopyModal(false)
+        setShowUpdateModal(false)
+      }
+    }
+    window.addEventListener('keydown', handleEsc)
+    return () => window.removeEventListener('keydown', handleEsc)
+  }, [])
+
+  // Auto-refresh authentication session every 5 minutes
+  useEffect(() => {
+    const authTimer = setInterval(() => {
+      checkAuth()
+    }, 5 * 60 * 1000)
+    return () => clearInterval(authTimer)
   }, [])
 
   // Screener & Double Confirmation state (App 2)
@@ -326,6 +362,7 @@ export default function App() {
       }, autoRefreshSecs * 1000)
       return () => clearInterval(timer)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoRefreshSecs, scanStatus.is_running])
 
   useEffect(() => {
@@ -405,7 +442,7 @@ export default function App() {
     try {
       const res = await authFetch(`${API_BASE}/api/scanner/stop`, { method: 'POST' })
       if (res.ok) {
-        setSuccessMessage('Scan abort initiated.')
+        setSuccessMessage('Scan abort initiated.'); addToast('Scan abort initiated.', 'info')
       } else {
         const err = await res.json().catch(() => ({}))
         setErrorMessage(err.message || 'Failed to stop scanner.')
@@ -468,7 +505,7 @@ export default function App() {
       setDirectToken('')
       setUpdateTokenInput('')
       setShowUpdateModal(false)
-      setSuccessMessage(data.message || `Connected to Upstox successfully as ${data.user_name || data.user_id}!`)
+      setSuccessMessage(data.message || `Connected to Upstox successfully as ${data.user_name || data.user_id}!`); addToast(`Connected to Upstox as ${data.user_name || data.user_id}!`, 'success')
       fetchResults()
       loadLeaderboard()
     } catch (err) {
@@ -634,9 +671,9 @@ export default function App() {
     } else if (signalFilter === 'SELL') {
       list = list.filter(r => (r.Status === 'SELL' || r['Signal Type'] === 'SELL' || r['Signal Type'] === 'BEARISH'))
     } else if (signalFilter === 'CONFIRMED') {
-      list = list.filter(r => (r['Is Confirmed'] || r.is_confirmed || r.Status === 'BUY' || r.Status === 'SELL'))
+      list = list.filter(r => (r['Is Confirmed'] === true || r.Status === 'BUY' || r.Status === 'SELL'))
     } else if (signalFilter === 'WATCH') {
-      list = list.filter(r => r.Status === 'WATCH' || (!r['Is Confirmed'] && !r.is_confirmed && r.Status !== 'BUY' && r.Status !== 'SELL'))
+      list = list.filter(r => r.Status === 'WATCH' || (r['Is Confirmed'] !== true && r.Status !== 'BUY' && r.Status !== 'SELL'))
     }
 
     // Activity Rank Filter (Top 10, 25, 50, 100, 200, 500)
@@ -693,7 +730,7 @@ export default function App() {
   // Reset page when filter inputs change
   useEffect(() => {
     setCurrentPage(1)
-  }, [searchQuery, signalFilter, selectedUniverse, activityRankFilter, changeFilter, minScoreFilter])
+  }, [searchQuery, signalFilter, selectedUniverse, activityRankFilter, changeFilter, minScoreFilter, pageSize])
 
   // Pagination calculation for high performance rendering of up to 501 rows
   const totalPages = Math.max(1, Math.ceil(filteredAndSortedResults.length / pageSize))
@@ -723,7 +760,7 @@ export default function App() {
     ]
     const csvRows = [headers.join(',')]
     for (const r of filteredAndSortedResults) {
-      const crVal = r['Traded Value Cr'] ?? ((r['Traded Value'] ?? r.traded_value ?? 0) / 1e7).toFixed(2)
+      const crVal = parseFloat(r['Traded Value Cr'] ?? ((r['Traded Value'] ?? r.traded_value ?? 0) / 1e7)).toFixed(2)
       csvRows.push([
         r.Rank ?? r['Activity Rank'] ?? '',
         `"${r.Symbol || ''}"`,
@@ -784,9 +821,13 @@ export default function App() {
         {/* Market Status Strip */}
         <div className="market-ticker-strip">
           <div className="market-status-badge">
-            <span className="pulse-beacon" style={{ backgroundColor: 'var(--bullish-neon)' }} />
-            <span>NSE MARKET HOURS</span>
-            <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 400 }}>09:15 - 15:30 IST</span>
+            <span className="pulse-beacon" style={{ backgroundColor: marketOverview?.market_session?.is_open ? 'var(--bullish-neon)' : 'var(--bearish-neon)' }} />
+            <span style={{ color: marketOverview?.market_session?.is_open ? 'var(--bullish-text)' : 'var(--bearish-text)' }}>
+              {marketOverview?.market_session?.phase || 'NSE MARKET'}
+            </span>
+            <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 400 }}>
+              {marketOverview?.market_session?.current_time_ist || '09:15 - 15:30 IST'}
+            </span>
           </div>
         </div>
 
@@ -1780,21 +1821,34 @@ export default function App() {
                 <tbody>
                   {filteredAndSortedResults.length === 0 ? (
                     <tr>
-                      <td colSpan={12} style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-muted)' }}>
-                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
-                          <Activity size={36} style={{ color: 'var(--text-faint)' }} />
-                          <div style={{ fontWeight: 600, fontSize: '1rem', color: '#ffffff' }}>
-                            {results.length === 0 ? 'No most-active stock scan data loaded.' : 'No active stocks match the current filters.'}
+                      <td colSpan={12} style={{ padding: 0 }}>
+                        <div className="table-empty-state">
+                          <div className="table-empty-icon">
+                            <Search size={22} />
                           </div>
-                          <div style={{ fontSize: '0.82rem', maxWidth: '420px', lineHeight: 1.5 }}>
+                          <div className="table-empty-title">
+                            {results.length === 0 ? 'No stock scan data loaded yet' : 'No stocks match your filter criteria'}
+                          </div>
+                          <div className="table-empty-desc">
                             {results.length === 0
-                              ? 'Click "Run Live 10m Scanner" above to discover today\'s Top 50 most active NSE cash equities and calculate completed 10-minute SMA 6/30 crossovers.'
-                              : 'Try adjusting your search query, activity rank slice, or minimum score filter.'}
+                              ? 'Click "Scan NIFTY Intraday" above to evaluate completed 10-minute bars across the selected universe.'
+                              : 'Try adjusting your search term, clearing index filters, or loosening the minimum score threshold.'}
                           </div>
-                          {results.length === 0 && (
-                            <button className="btn btn-primary" onClick={handleRunScanner} disabled={scanStatus.is_running} style={{ marginTop: '8px' }}>
-                              <Play size={14} fill="currentColor" />
-                              <span>Execute Discovery & 10m Scan</span>
+                          {results.length > 0 && (
+                            <button
+                              className="btn btn-secondary"
+                              onClick={() => {
+                                setSearchQuery('')
+                                setSignalFilter('ALL')
+                                setSelectedUniverse('ALL')
+                                setActivityRankFilter(500)
+                                setChangeFilter('ALL')
+                                setMinScoreFilter(0)
+                              }}
+                              style={{ padding: '6px 14px', fontSize: '0.78rem', marginTop: '6px' }}
+                            >
+                              <RotateCw size={12} />
+                              <span>Reset Filters</span>
                             </button>
                           )}
                         </div>
@@ -1867,16 +1921,10 @@ export default function App() {
                           <td className="font-mono" style={{ textAlign: 'right', color: isSell ? 'var(--bearish-text)' : 'var(--text-muted)', fontSize: '0.84rem' }}>
                             ₹{(item['SMA 30'] ?? 0).toFixed(2)}
                           </td>
-                          <td
-                            className="font-mono"
-                            style={{
-                              textAlign: 'right',
-                              fontWeight: 700,
-                              color: relVol >= 1.5 ? 'var(--bullish-neon)' : 'var(--text-muted)',
-                              fontSize: '0.84rem'
-                            }}
-                          >
-                            {Number(relVol).toFixed(2)}x
+                          <td style={{ textAlign: 'right' }}>
+                            <span className={relVol >= 1.5 ? 'rel-vol-high' : relVol >= 1.0 ? 'rel-vol-normal' : 'rel-vol-low'}>
+                              {Number(relVol).toFixed(2)}x
+                            </span>
                           </td>
                           <td className="font-mono" style={{ textAlign: 'center', fontSize: '0.74rem', color: 'var(--text-faint)' }}>
                             {item['Candle Timestamp'] ?? item.candle_timestamp ?? '10m Bar'}
@@ -1910,16 +1958,26 @@ export default function App() {
                             )}
                           </td>
                           <td style={{ textAlign: 'center' }}>
-                            <span
-                              className="font-mono"
-                              style={{
-                                fontSize: '0.78rem',
-                                fontWeight: 800,
-                                color: score >= 70 ? 'var(--bullish-neon)' : score >= 50 ? 'var(--accent-cyan)' : 'var(--text-muted)'
-                              }}
-                            >
-                              {score > 0 ? `${score}/100` : '—'}
-                            </span>
+                            <div className="score-cell-wrap">
+                              <span
+                                className="font-mono"
+                                style={{
+                                  fontSize: '0.78rem',
+                                  fontWeight: 800,
+                                  color: score >= 70 ? 'var(--bullish-neon)' : score >= 50 ? 'var(--accent-cyan)' : 'var(--text-muted)'
+                                }}
+                              >
+                                {score > 0 ? `${score}` : '—'}
+                              </span>
+                              {score > 0 && (
+                                <div className="score-bar-track">
+                                  <div
+                                    className={`score-bar-fill ${score >= 70 ? 'score-bar-bullish' : score >= 50 ? 'score-bar-neutral' : 'score-bar-bearish'}`}
+                                    style={{ width: `${Math.min(100, Math.max(0, score))}%` }}
+                                  />
+                                </div>
+                              )}
+                            </div>
                           </td>
                           <td>
                             <div className="row-actions" onClick={(e) => e.stopPropagation()}>
@@ -3495,6 +3553,27 @@ export default function App() {
           Scanner Algorithm: <span style={{ color: '#ffffff' }}>SMA 6 vs SMA 30 Dual Confirmed Cross (NSE Equities)</span>
         </div>
       </footer>
+
+      {/* Floating Auto-Dismiss Toast Container */}
+      {toasts.length > 0 && (
+        <div className="toast-container">
+          {toasts.map((t) => (
+            <div key={t.id} className={`toast-pill toast-${t.type}`}>
+              {t.type === 'success' && <CheckCircle2 size={16} />}
+              {t.type === 'error' && <AlertCircle size={16} />}
+              {t.type === 'info' && <Zap size={16} />}
+              <span style={{ flex: 1 }}>{t.message}</span>
+              <button
+                className="toast-close-btn"
+                onClick={() => removeToast(t.id)}
+                title="Dismiss"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

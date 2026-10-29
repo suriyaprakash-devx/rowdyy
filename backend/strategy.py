@@ -296,6 +296,8 @@ class SMA6_30Strategy:
             if dedup_key in _ALERTED_SIGNALS:
                 is_duplicate = True
             else:
+                if len(_ALERTED_SIGNALS) >= 500:
+                    _ALERTED_SIGNALS.clear()
                 _ALERTED_SIGNALS.add(dedup_key)
 
         return {

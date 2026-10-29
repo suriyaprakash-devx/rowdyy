@@ -203,7 +203,7 @@ async def save_direct_token(
         max_age=86400,
         httponly=True,
         samesite="lax",
-        secure=settings.DATABASE_URL.startswith("postgresql")
+        secure=(settings.ENVIRONMENT.lower() == "production")
     )
 
     return {

@@ -1970,3 +1970,21 @@
   font-size: 0.74rem;
   line-height: 1.45;
 }
+
+/* ========================================================================= */
+/* MOBILE RESPONSIVE ENHANCEMENTS FOR INTRADAY TELEMETRY BANNER              */
+/* ========================================================================= */
+@media (max-width: 768px) {
+  .intraday-telemetry-banner {
+    display: flex !important;
+    overflow-x: auto !important;
+    flex-wrap: nowrap !important;
+    scrollbar-width: thin;
+    padding-bottom: 8px !important;
+    -webkit-overflow-scrolling: touch;
+  }
+  .telemetry-chip {
+    flex: 0 0 135px !important;
+    min-width: 135px !important;
+  }
+}

@@ -51,7 +51,7 @@ def init_db():
         with engine.begin() as conn:
             # Query existing columns
             cols = []
-            if settings.DATABASE_URL.startswith("sqlite"):
+            if engine.dialect.name == "sqlite":
                 cursor = conn.execute(text("PRAGMA table_info(scan_results)"))
                 cols = [row[1] for row in cursor.fetchall()]
             else:

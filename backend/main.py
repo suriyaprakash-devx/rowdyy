@@ -248,11 +248,17 @@ async def trigger_scan(
         except Exception:
             access_token = None
 
-    asyncio.create_task(scanner_manager.run_scan(
-        access_token=access_token,
-        universe_filter=universe or "ALL",
-        limit=limit or 500
-    ))
+    async def _run_scan_and_refresh_cache():
+        try:
+            await scanner_manager.run_scan(
+                access_token=access_token,
+                universe_filter=universe or "ALL",
+                limit=limit or 500
+            )
+        finally:
+            _LEADERBOARD_CACHE["timestamp"] = 0.0
+
+    asyncio.create_task(_run_scan_and_refresh_cache())
 
     return {
         "status": "started",
@@ -669,6 +675,18 @@ async def get_algo_analysis(
                         "risk_reward_t2": round(abs(tg2 - ent) / risk_ps, 2) if risk_ps else 3.0,
                         "session_cutoff": "15:15 IST",
                         "alert_note": "ALERT-ONLY: Route order manually in your broker terminal."
+                    }
+                    data["order_ticket"] = {
+                        "symbol": clean_symbol,
+                        "action": tp.get("action", "BUY"),
+                        "product": "MIS",
+                        "order_type": "LIMIT",
+                        "entry_price": round(ent, 2),
+                        "stoploss": round(sl, 2),
+                        "target_1": round(tg1, 2),
+                        "target_2": round(tg2, 2),
+                        "quantity": qty,
+                        "formatted_ticket": f"BUY {clean_symbol} MIS LIMIT @ ₹{round(ent, 2)} | SL: ₹{round(sl, 2)} | T1: ₹{round(tg1, 2)} | Alert only: Zero automated orders."
                     }
                 return {"status": "success", "mode": "swing_fallback", "data": data}
             except Exception as e2:

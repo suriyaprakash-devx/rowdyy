@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -7,8 +8,10 @@ import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
-# In-memory cache for fundamentals (TTL 1 hour)
+# In-memory cache for fundamentals (TTL 1 hour, Max 100 entries)
 _FUNDAMENTALS_CACHE: Dict[str, Dict[str, Any]] = {}
+CACHE_TTL = 3600
+CACHE_MAX_SIZE = 100
 
 # Offline fallback fundamentals database
 _OFFLINE_FUNDAMENTALS: Dict[str, Dict[str, Any]] = {}
@@ -440,33 +443,36 @@ def get_stock_analysis(symbol: str, sma_signal: Optional[str] = None) -> Dict[st
     computes the 100-Point Stock Perfection Score, and produces a Double Confirmation signal.
     """
     clean_sym = symbol.strip().upper()
+    now_ts = time.time()
     if clean_sym in _FUNDAMENTALS_CACHE:
-        cached = _FUNDAMENTALS_CACHE[clean_sym]
-        # Update with latest technical signal if provided
-        if sma_signal:
-            cached["technical_signal"] = sma_signal
-            cached["double_confirmation"] = _calculate_double_confirmation(sma_signal, cached["fundamental_verdict"])
-            # Re-evaluate perfection score with updated technical signal
-            perf = calculate_stock_perfection_score(
-                symbol=clean_sym,
-                technical_signal=sma_signal,
-                current_price=cached.get("current_price", 0.0),
-                high_52w=cached.get("high_52w", 0.0),
-                low_52w=cached.get("low_52w", 0.0),
-                trailing_pe=cached.get("trailing_pe"),
-                forward_pe=cached.get("forward_pe"),
-                trailing_eps=cached.get("trailing_eps"),
-                forward_eps=cached.get("forward_eps"),
-                debt_to_equity=cached.get("debt_to_equity"),
-                return_on_equity=cached.get("return_on_equity"),
-                profit_margins=cached.get("profit_margins"),
-                operating_margins=cached.get("operating_margins"),
-                market_cap_crores=cached.get("market_cap_cr")
-            )
-            cached["perfection_score"] = perf["total_score"]
-            cached["perfection_grade"] = perf["grade"]
-            cached["perfection_details"] = perf
-        return cached
+        entry = _FUNDAMENTALS_CACHE[clean_sym]
+        if (now_ts - entry.get("cached_at", 0)) < CACHE_TTL:
+            cached = entry["data"].copy()
+            # Update with latest technical signal if provided
+            if sma_signal:
+                cached["technical_signal"] = sma_signal
+                cached["double_confirmation"] = _calculate_double_confirmation(sma_signal, cached["fundamental_verdict"])
+                # Re-evaluate perfection score with updated technical signal
+                perf = calculate_stock_perfection_score(
+                    symbol=clean_sym,
+                    technical_signal=sma_signal,
+                    current_price=cached.get("current_price", 0.0),
+                    high_52w=cached.get("high_52w", 0.0),
+                    low_52w=cached.get("low_52w", 0.0),
+                    trailing_pe=cached.get("trailing_pe"),
+                    forward_pe=cached.get("forward_pe"),
+                    trailing_eps=cached.get("trailing_eps"),
+                    forward_eps=cached.get("forward_eps"),
+                    debt_to_equity=cached.get("debt_to_equity"),
+                    return_on_equity=cached.get("return_on_equity"),
+                    profit_margins=cached.get("profit_margins"),
+                    operating_margins=cached.get("operating_margins"),
+                    market_cap_crores=cached.get("market_cap_cr")
+                )
+                cached["perfection_score"] = perf["total_score"]
+                cached["perfection_grade"] = perf["grade"]
+                cached["perfection_details"] = perf
+            return cached
 
     # 2. Retrieve audited profile from offline database
     db = _init_offline_fundamentals()
@@ -727,7 +733,11 @@ def get_stock_analysis(symbol: str, sma_signal: Optional[str] = None) -> Dict[st
         "perfection_details": perfection_score
     }
 
-    _FUNDAMENTALS_CACHE[clean_sym] = analysis_result
+    if len(_FUNDAMENTALS_CACHE) >= CACHE_MAX_SIZE and clean_sym not in _FUNDAMENTALS_CACHE:
+        oldest = min(_FUNDAMENTALS_CACHE.keys(), key=lambda k: _FUNDAMENTALS_CACHE[k].get("cached_at", 0))
+        _FUNDAMENTALS_CACHE.pop(oldest, None)
+
+    _FUNDAMENTALS_CACHE[clean_sym] = {"data": analysis_result, "cached_at": now_ts}
     return analysis_result
 
 def _calculate_double_confirmation(technical_signal: str, fundamental_verdict: str) -> Dict[str, Any]:

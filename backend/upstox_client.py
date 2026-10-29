@@ -26,6 +26,13 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 INSTRUMENT_CACHE_FILE = CACHE_DIR / "upstox_nse_eq_instruments.json"
 CACHE_TTL_HOURS = 24
 
+
+
+
+class HTTPException_401(Exception):
+    pass
+
+
 class UpstoxClientManager:
     """
     Manages communication with Upstox API v2 and instrument mappings.
@@ -553,9 +560,6 @@ class UpstoxClientManager:
                 logger.debug(f"Live feed fallback error for {symbol}: {e}")
 
         return None
-
-class HTTPException_401(Exception):
-    pass
 
 upstox_client_manager = UpstoxClientManager()
 

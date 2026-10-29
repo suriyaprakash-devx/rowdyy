@@ -7,6 +7,8 @@
 import time
 import datetime
 import logging
+import json
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 import yfinance as yf
@@ -40,6 +42,7 @@ import concurrent.futures
 # In-memory cache for fast repeated views (TTL 600s)
 _SWING_CACHE: Dict[str, Dict[str, Any]] = {}
 CACHE_TTL = 600
+CACHE_MAX_SIZE = 50
 
 # Benchmark NIFTY 5Y cache (TTL 3600s)
 _NIFTY_CACHE: Dict[str, Any] = {"data": None, "timestamp": 0}
@@ -144,7 +147,7 @@ def run_ai_swing_analysis(company_symbol: str, force_refresh: bool = False) -> D
     if df is None or df.empty:
         warnings.append(f"Notice: Historical feed for {company} generated via benchmark volatility simulation.")
         seed = sum(ord(c) for c in company)
-        np.random.seed(seed)
+        rng = np.random.default_rng(seed)
         base_price = 250.0 + (seed % 2500)
         
         # Use nifty dates or 5 years of business days
@@ -153,13 +156,13 @@ def run_ai_swing_analysis(company_symbol: str, force_refresh: bool = False) -> D
         else:
             dates = pd.date_range(end=pd.Timestamp.now(), periods=1250, freq="B")
         
-        drift = np.random.normal(0.0004, 0.016, len(dates))
+        drift = rng.normal(0.0004, 0.016, len(dates))
         cum_ret = np.exp(drift.cumsum())
         sim_close = base_price * cum_ret
-        sim_high = sim_close * (1.0 + np.random.uniform(0.005, 0.025, len(sim_close)))
-        sim_low = sim_close * (1.0 - np.random.uniform(0.005, 0.025, len(sim_close)))
-        sim_open = sim_close * (1.0 + np.random.normal(0, 0.008, len(sim_close)))
-        sim_vol = np.random.randint(400000, 4000000, len(sim_close))
+        sim_high = sim_close * (1.0 + rng.uniform(0.005, 0.025, len(sim_close)))
+        sim_low = sim_close * (1.0 - rng.uniform(0.005, 0.025, len(sim_close)))
+        sim_open = sim_close * (1.0 + rng.normal(0, 0.008, len(sim_close)))
+        sim_vol = rng.integers(400000, 4000000, len(sim_close))
         df = pd.DataFrame({
             "Open": sim_open, "High": sim_high, "Low": sim_low, "Close": sim_close, "Volume": sim_vol
         }, index=dates)
@@ -274,11 +277,16 @@ def run_ai_swing_analysis(company_symbol: str, force_refresh: bool = False) -> D
     # WEEKLY TREND  (multi-timeframe)
     # =========================================================
     wk_close = df_wk["Close"].squeeze()
-    df_wk["EMA20"] = EMAIndicator(wk_close, window=20).ema_indicator()
-    df_wk["EMA50"] = EMAIndicator(wk_close, window=50).ema_indicator()
-    df_wk.dropna(inplace=True)
-
-    weekly_trend = "BULLISH" if df_wk["EMA20"].iloc[-1] > df_wk["EMA50"].iloc[-1] else "BEARISH"
+    if len(df_wk) >= 50:
+        df_wk["EMA20"] = EMAIndicator(wk_close, window=20).ema_indicator()
+        df_wk["EMA50"] = EMAIndicator(wk_close, window=50).ema_indicator()
+        df_wk_clean = df_wk.dropna()
+        if not df_wk_clean.empty:
+            weekly_trend = "BULLISH" if df_wk_clean["EMA20"].iloc[-1] > df_wk_clean["EMA50"].iloc[-1] else "BEARISH"
+        else:
+            weekly_trend = "BULLISH" if df["EMA20"].iloc[-1] > df["EMA50"].iloc[-1] else "BEARISH"
+    else:
+        weekly_trend = "BULLISH" if ("EMA20" in df and "EMA50" in df and df["EMA20"].iloc[-1] > df["EMA50"].iloc[-1]) else "BEARISH"
 
     # =========================================================
     # TARGET  (did price rise in next SWING_DAYS?)
@@ -555,6 +563,11 @@ def run_ai_swing_analysis(company_symbol: str, force_refresh: bool = False) -> D
         "warnings": warnings,
         "recent_history": recent_history
     }
+
+    # LRU eviction if cache exceeds CACHE_MAX_SIZE
+    if len(_SWING_CACHE) >= CACHE_MAX_SIZE and company not in _SWING_CACHE:
+        oldest = min(_SWING_CACHE.keys(), key=lambda k: _SWING_CACHE[k].get("cached_at", 0))
+        _SWING_CACHE.pop(oldest, None)
 
     _SWING_CACHE[company] = {
         "cached_at": now,
