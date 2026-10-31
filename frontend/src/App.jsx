@@ -36,6 +36,7 @@ import {
 } from 'lucide-react'
 import './App.css'
 import AlgoSignals from './AlgoSignals'
+import SMCEngine from './SMCEngine'
 
 // Dynamic API Base URL configuration for Render deployment (supports both unified and separate services)
 const RAW_API_URL = import.meta.env.VITE_API_URL || ''
@@ -898,6 +899,14 @@ export default function App() {
           <BarChart3 size={16} />
           <span>⚡ 1️⃣ NIFTY 500 Intraday SMA 6/30 Scanner</span>
           <span className="app-mode-badge bullish">{results.length || 501} Stocks</span>
+        </button>
+        <button
+          className={`app-mode-btn ${activeApp === 'smc_engine' ? 'active' : ''}`}
+          onClick={() => setActiveApp('smc_engine')}
+        >
+          <Sparkles size={16} />
+          <span>🏛️ SMC-NSE Engine</span>
+          <span className="app-mode-badge cyan">1:3 & 1:5 SMC</span>
         </button>
         <button
           className={`app-mode-btn ${activeApp === 'algo_signals' ? 'active' : ''}`}
@@ -2880,6 +2889,9 @@ export default function App() {
       {/* ========================================================================= */}
       {/* APP 4: ALGO SIGNALS (AI SWING TRADING SYSTEM v4.0)                        */}
       {/* ========================================================================= */}
+      {activeApp === 'smc_engine' && (
+        <SMCEngine apiBase={API_BASE} />
+      )}
       {activeApp === 'algo_signals' && (
         <AlgoSignals apiBase={API_BASE} initialSymbol={algoSymbol} />
       )}

@@ -579,6 +579,30 @@ async def get_scoring_leaderboard(db: Session = Depends(get_db)):
     }
 
 
+# ----------------- SMC-NSE Engine Endpoints -----------------
+from backend.algo_smc import run_smc_scan, analyze_single_smc, get_nse_ist_session
+
+@app.get("/api/smc/session")
+async def get_smc_session():
+    """Returns real-time IST market session and SMC execution window status."""
+    return get_nse_ist_session()
+
+@app.get("/api/smc/scan")
+async def get_smc_scan(refresh: bool = False):
+    """Executes or returns cached institutional SMC scan across liquid NSE stocks."""
+    return run_smc_scan(force_refresh=refresh)
+
+@app.get("/api/smc/analyze/{symbol}")
+async def get_smc_single_stock(symbol: str):
+    """Analyzes a specific stock under SMC concepts."""
+    sym = symbol.upper()
+    if not sym.endswith(".NS"):
+        sym = f"{sym}.NS"
+    result = analyze_single_smc(sym)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"SMC analysis failed or no setup found for {symbol}")
+    return result
+
 # ----------------- Algo Signals Endpoints (Intraday AI & Swing Trading) -----------------
 import json
 import random

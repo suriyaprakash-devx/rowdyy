@@ -1,75 +1,24 @@
 services:
-  # -------------------------------------------------------------
-  # Backend: Python FastAPI Web Service
-  # -------------------------------------------------------------
+  # -----------------------------------------------------------------------------
+  # SMC-NSE Institutional Terminal: Unified Web Service (Backend + React UI)
+  # -----------------------------------------------------------------------------
   - type: web
-    name: upstox-scanner-backend
-    runtime: python
+    name: smc-nse-terminal
+    env: docker
+    dockerfilePath: Dockerfile
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     autoDeploy: true
     envVars:
-      - key: PYTHON_VERSION
-        value: "3.11.9"
-      - key: DATABASE_URL
-        fromDatabase:
-          name: upstox-scanner-db
-          property: connectionString
-      - key: UPSTOX_CLIENT_ID
-        sync: false
-      - key: UPSTOX_CLIENT_SECRET
-        sync: false
-      - key: UPSTOX_REDIRECT_URI
-        sync: false
-      - key: FRONTEND_URL
-        sync: false
-      - key: ALLOWED_ORIGINS
-        sync: false
+      - key: PORT
+        value: "8000"
+      - key: ENVIRONMENT
+        value: "production"
       - key: SESSION_SECRET_KEY
         generateValue: true
-      - key: ENCRYPTION_KEY
-        sync: false
-      - key: DELETE_RESULTS_AFTER_SCAN
-        value: "false"
+      - key: DATABASE_URL
+        value: "sqlite:///./data/scanner.db"
       - key: INCLUDE_CURRENT_DAY_CANDLE
         value: "true"
-
-  # -------------------------------------------------------------
-  # Frontend: React + Vite Static Site
-  # -------------------------------------------------------------
-  - type: web
-    name: upstox-scanner-frontend
-    runtime: static
-    rootDir: frontend
-    buildCommand: npm install && npm run build
-    staticPublishPath: dist
-    envVars:
-      - key: NODE_VERSION
-        value: "20.18.0"
-      - key: VITE_API_URL
-        fromService:
-          type: web
-          name: upstox-scanner-backend
-          property: host
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
-    headers:
-      - path: /*
-        name: X-Frame-Options
-        value: DENY
-      - path: /*
-        name: X-Content-Type-Options
-        value: nosniff
-
-# ---------------------------------------------------------------
-# Database: Render Managed PostgreSQL
-# ---------------------------------------------------------------
-databases:
-  - name: upstox-scanner-db
-    databaseName: upstox_scanner
-    user: upstox_admin
-    plan: free
+      - key: DELETE_RESULTS_AFTER_SCAN
+        value: "false"
