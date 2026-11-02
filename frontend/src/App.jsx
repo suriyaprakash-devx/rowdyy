@@ -263,6 +263,7 @@ export default function App() {
   const [sortDirection, setSortDirection] = useState('asc') // asc, desc
 
   const [selectedStock, setSelectedStock] = useState(null)
+  const [algoSymbol, setAlgoSymbol] = useState('RELIANCE')
   const [showSettingsModal, setShowSettingsModal] = useState(false)
 
   const [isRefreshing, setIsRefreshing] = useState(false)
@@ -2389,6 +2390,14 @@ export default function App() {
                             </button>
                             <button
                               className="btn btn-secondary"
+                              onClick={() => navigateToAlgoSignals(alert.Symbol)}
+                              style={{ padding: '5px 10px', fontSize: '0.74rem', gap: '4px', color: '#fbbf24', borderColor: 'rgba(251, 191, 36, 0.4)' }}
+                              title="Open Intraday AI Signal & Execution Ticket"
+                            >
+                              <span>🤖 Order Slip</span>
+                            </button>
+                            <button
+                              className="btn btn-secondary"
                               onClick={() => setSelectedStock(alert)}
                               style={{ padding: '5px 10px', fontSize: '0.74rem' }}
                             >
@@ -2532,6 +2541,14 @@ export default function App() {
                               title="Open ready-to-execute broker order ticket (Zerodha, Upstox, Angel, Groww)"
                             >
                               <span>📋 Broker Slip</span>
+                            </button>
+                            <button
+                              className="btn btn-secondary"
+                              onClick={() => navigateToAlgoSignals(alert.Symbol)}
+                              style={{ padding: '5px 10px', fontSize: '0.74rem', gap: '4px', color: '#fbbf24', borderColor: 'rgba(251, 191, 36, 0.4)' }}
+                              title="Open Intraday AI Signal & Execution Ticket"
+                            >
+                              <span>🤖 Order Slip</span>
                             </button>
                             <button
                               className="btn btn-secondary"
@@ -3365,6 +3382,14 @@ export default function App() {
                                 📋 <span>Slip</span>
                               </button>
                               <button
+                                className="btn-slip"
+                                onClick={() => navigateToAlgoSignals(item.Symbol)}
+                                title="Open Intraday AI Signal & Execution Ticket"
+                                style={{ color: '#fbbf24', borderColor: 'rgba(251, 191, 36, 0.4)' }}
+                              >
+                                🤖 <span>Order Slip</span>
+                              </button>
+                              <button
                                 className="btn btn-secondary"
                                 onClick={() => setSelectedStock(item)}
                                 title="Inspect SMC Structure & Invalidation"
@@ -3559,6 +3584,10 @@ export default function App() {
           onOpenOrderTicket={(stk) => {
             setSelectedStock(null)
             openBrokerTicketModal(stk)
+          }}
+          onOpenAlgoSignals={(stk) => {
+            setSelectedStock(null)
+            navigateToAlgoSignals(stk?.Symbol || stk?.symbol || 'RELIANCE')
           }}
         />
       )}

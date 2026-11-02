@@ -24,7 +24,8 @@ export default function SMCChartModal({
   timeframe = '10m',
   onClose,
   onOpenCalculator,
-  onOpenOrderTicket
+  onOpenOrderTicket,
+  onOpenAlgoSignals
 }) {
   const [activeTab, setActiveTab] = useState('chart') // 'chart' | 'ai' | 'confluence'
   const [detailData, setDetailData] = useState(stock)
@@ -997,6 +998,26 @@ export default function SMCChartModal({
             >
               <span>Broker Order Ticket (Manual Slip)</span>
             </button>
+            {onOpenAlgoSignals && (
+              <button
+                onClick={() => onOpenAlgoSignals(detailData)}
+                style={{
+                  background: 'linear-gradient(135deg, rgba(234, 179, 8, 0.2), rgba(245, 158, 11, 0.3))',
+                  color: '#fbbf24',
+                  border: '1px solid rgba(245, 158, 11, 0.5)',
+                  borderRadius: '8px',
+                  padding: '8px 16px',
+                  fontSize: '0.8rem',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px'
+                }}
+              >
+                <span>🤖 Intraday Signal & Order Slip</span>
+              </button>
+            )}
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
@@ -1036,3 +1057,4 @@ export default function SMCChartModal({
     </div>
   )
 }
+

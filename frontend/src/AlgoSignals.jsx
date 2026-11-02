@@ -53,6 +53,13 @@ const POPULAR_SYMBOLS = [
   'MARUTI'
 ]
 
+const LOADING_MESSAGES = [
+  'Fetching real-time completed 10m candles & session VWAP...',
+  'Feature engineering: SMA 6 & 30 Cross, Relative Volume & Supertrend (10, 2)...',
+  'Executing XGBoost classifier with 5-fold walk-forward validation...',
+  'Calculating dynamic ATR Stop Loss, Target 1, Target 2 & order ticket...'
+]
+
 // =========================================================================
 // 1. INTERACTIVE CANDLESTICK & EMA & VOLUME SVG CHART
 // =========================================================================
@@ -624,15 +631,17 @@ function OrderExecutionSlip({
   const [customPrice, setCustomPrice] = useState('')
   const [copied, setCopied] = useState(false)
 
-  const isSell = signal === 'SELL' || signal === 'STRONG SELL' || tradePlan?.action === 'SELL'
+  const plan = tradePlan || {}
+  const isSell = signal === 'SELL' || signal === 'STRONG SELL' || plan?.action === 'SELL'
   const direction = isSell ? 'SELL' : 'BUY'
-  const entryPrice = customPrice !== '' && !isNaN(Number(customPrice)) && Number(customPrice) > 0
+  const rawEntry = customPrice !== '' && !isNaN(Number(customPrice)) && Number(customPrice) > 0
     ? Number(customPrice)
-    : (tradePlan.entry_price || currentPrice || 100)
+    : (Number(plan?.entry_price) || Number(currentPrice) || 100)
+  const entryPrice = Math.max(0.05, rawEntry)
 
-  const stoplossPrice = tradePlan?.stoploss_price || (isSell ? entryPrice * 1.01 : entryPrice * 0.99)
-  const target1Price = tradePlan?.target_1 || tradePlan?.target1_price || tradePlan?.target_price || (isSell ? entryPrice - Math.abs(entryPrice - stoplossPrice) * 1.5 : entryPrice + Math.abs(entryPrice - stoplossPrice) * 1.5)
-  const target2Price = tradePlan?.target_2 || tradePlan?.target2_price || (isSell ? entryPrice - Math.abs(entryPrice - stoplossPrice) * 2.5 : entryPrice + Math.abs(entryPrice - stoplossPrice) * 2.5)
+  const stoplossPrice = Number(plan?.stoploss_price) || (isSell ? entryPrice * 1.01 : entryPrice * 0.99)
+  const target1Price = Number(plan?.target_1) || Number(plan?.target1_price) || Number(plan?.target_price) || (isSell ? entryPrice - Math.abs(entryPrice - stoplossPrice) * 1.5 : entryPrice + Math.abs(entryPrice - stoplossPrice) * 1.5)
+  const target2Price = Number(plan?.target_2) || Number(plan?.target2_price) || (isSell ? entryPrice - Math.abs(entryPrice - stoplossPrice) * 2.5 : entryPrice + Math.abs(entryPrice - stoplossPrice) * 2.5)
 
   const riskPerShare = Math.max(0.05, Math.abs(entryPrice - stoplossPrice))
   const suggestedQty = Math.max(1, Math.floor(riskAmount / riskPerShare))
@@ -914,7 +923,7 @@ export default function AlgoSignals({ apiBase = '', initialSymbol = 'RELIANCE' }
     if (loading) {
       setLoadingStep(0)
       interval = setInterval(() => {
-        setLoadingStep(prev => (prev + 1) % loadingMessages.length)
+        setLoadingStep(prev => (prev + 1) % LOADING_MESSAGES.length)
       }, 2000)
     }
     return () => {
@@ -1036,12 +1045,7 @@ export default function AlgoSignals({ apiBase = '', initialSymbol = 'RELIANCE' }
     }
   }
 
-  const loadingMessages = [
-    'Fetching real-time completed 10m candles & session VWAP...',
-    'Feature engineering: SMA 6 & 30 Cross, Relative Volume & Supertrend (10, 2)...',
-    'Executing XGBoost classifier with 5-fold walk-forward validation...',
-    'Calculating dynamic ATR Stop Loss, Target 1, Target 2 & order ticket...'
-  ]
+  const loadingMessages = LOADING_MESSAGES
 
   const isSellSignal = data?.signal === 'SELL' || data?.signal === 'STRONG SELL' || data?.trade_plan?.action === 'SELL'
   const activeChecklistType = checklistTab === 'auto'
