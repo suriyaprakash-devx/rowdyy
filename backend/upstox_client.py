@@ -284,6 +284,59 @@ class UpstoxClientManager:
                     await asyncio.sleep(0.3)
         return []
 
+    async def fetch_candles(
+        self,
+        instrument_key: str,
+        symbol: Optional[str] = None,
+        interval_minutes: int = 10,
+        min_candles: int = 35,
+        access_token: Optional[str] = None
+    ) -> List[List[Any]]:
+        """Fetches completed intraday candles for requested interval (5m, 10m, 15m)."""
+        candles: List[List[Any]] = []
+        interval_str = str(interval_minutes)
+        if access_token:
+            try:
+                candles = await self.fetch_intraday_candles_v3(
+                    instrument_key=instrument_key,
+                    unit="minutes",
+                    interval=interval_str,
+                    access_token=access_token
+                )
+            except HTTPException_401:
+                raise
+            except Exception as e:
+                logger.debug(f"V3 intraday fetch error for {instrument_key}: {e}")
+
+            if len(candles) < min_candles:
+                now = datetime.now()
+                to_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+                from_date = (now - timedelta(days=5)).strftime("%Y-%m-%d")
+                try:
+                    hist_candles = await self.fetch_historical_candles_v3(
+                        instrument_key=instrument_key,
+                        to_date=to_date,
+                        from_date=from_date,
+                        unit="minutes",
+                        interval=interval_str,
+                        access_token=access_token
+                    )
+                    if hist_candles:
+                        candles = candles + hist_candles
+                except Exception as e:
+                    logger.debug(f"V3 historical {interval_str}m fetch error for {instrument_key}: {e}")
+
+        if len(candles) < min_candles and symbol:
+            try:
+                from backend.live_feed import get_intraday_candles_fallback
+                fallback_candles = await get_intraday_candles_fallback(symbol, interval_minutes=interval_minutes, min_candles=min_candles)
+                if fallback_candles and len(fallback_candles) >= len(candles):
+                    candles = fallback_candles
+            except Exception as e:
+                logger.debug(f"Intraday fallback error for {symbol} ({interval_minutes}m): {e}")
+
+        return candles
+
     async def fetch_10m_candles(
         self,
         instrument_key: str,
@@ -334,12 +387,12 @@ class UpstoxClientManager:
         # Fallback to local / live feed synthesis if Upstox candles insufficient or no token
         if len(candles) < min_candles and symbol:
             try:
-                from backend.live_feed import get_intraday_10m_candles_fallback
-                fallback_candles = await get_intraday_10m_candles_fallback(symbol, min_candles=min_candles)
+                from backend.live_feed import get_intraday_candles_fallback
+                fallback_candles = await get_intraday_candles_fallback(symbol, interval_minutes=interval_minutes, min_candles=min_candles)
                 if fallback_candles and len(fallback_candles) >= len(candles):
                     candles = fallback_candles
             except Exception as e:
-                logger.debug(f"Intraday fallback error for {symbol}: {e}")
+                logger.debug(f"Intraday fallback error for {symbol} ({interval_minutes}m): {e}")
 
         return candles
 

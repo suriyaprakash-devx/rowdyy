@@ -1,131 +1,107 @@
-import asyncio
-import logging
 import time
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 import httpx
 
-logger = logging.getLogger("live_feed")
+logger = logging.getLogger(__name__)
 
-# Symbol mapping overrides for NSE equities
-SYMBOL_MAP = {
-    "M&M": "M&M.NS",
-    "BAJAJ-AUTO": "BAJAJ-AUTO.NS",
-    "L&TFH": "LTF.NS",
-    "MCDOWELL-N": "UNITDSPR.NS",
-    "NAM-INDIA": "NAM-INDIA.NS",
-    "TATACONSUM": "TATACONSUM.NS",
-    "TATAMOTORS": "TATAMTR.NS",
-    "LTIM": "LTIM.NS",
-    "NIFTY": "^NSEI",
-    "NIFTY 50": "^NSEI"
-}
+# In-memory quote cache (symbol -> (timestamp, quote_dict))
+_LIVE_QUOTE_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
+_QUOTE_CACHE_TTL = 10.0  # 10 seconds
+
+# In-memory candle cache (cache_key -> (timestamp, candle_list))
+_INTRADAY_CANDLE_CACHE: Dict[str, tuple[float, List[List[Any]]]] = {}
+_CANDLE_CACHE_TTL = 60.0  # 60 seconds
 
 def get_yahoo_ticker(symbol: str) -> str:
+    """Converts NSE symbol to Yahoo Finance ticker format."""
     clean = symbol.strip().upper()
-    if clean in SYMBOL_MAP:
-        return SYMBOL_MAP[clean]
-    clean_mapped = clean.replace("&", "_")
-    return f"{clean_mapped}.NS" if not clean_mapped.endswith(".NS") else clean_mapped
+    if clean.startswith("^"):
+        return clean
+    if not clean.endswith(".NS"):
+        return f"{clean}.NS"
+    return clean
 
-# In-memory quote cache with 10-second TTL
-_QUOTE_CACHE: Dict[str, Dict[str, Any]] = {}
-_CACHE_TIMESTAMP: float = 0.0
-_CACHE_LOCK = asyncio.Lock()
+async def get_live_quote(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetches real-time price and volume data via financial market feeds.
+    Falls back gracefully when Upstox token is expired or unavailable.
+    """
+    now = time.time()
+    clean_sym = symbol.strip().upper()
+    
+    if clean_sym in _LIVE_QUOTE_CACHE:
+        ts, data = _LIVE_QUOTE_CACHE[clean_sym]
+        if (now - ts) < _QUOTE_CACHE_TTL:
+            return data
 
-# In-memory 10-minute candle cache with 60-second TTL
-_INTRADAY_CANDLE_CACHE: Dict[str, Any] = {}
-_CANDLE_CACHE_LOCK = asyncio.Lock()
-
-async def fetch_single_live_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Dict[str, Any]]:
-    ticker = get_yahoo_ticker(symbol)
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=2d"
+    ticker = get_yahoo_ticker(clean_sym)
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1m&range=1d"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "application/json"
     }
-    try:
-        resp = await client.get(url, headers=headers)
-        if resp.status_code == 200:
-            data = resp.json()
-            results = data.get("chart", {}).get("result", [])
-            if results:
-                meta = results[0].get("meta", {})
-                last_price = meta.get("regularMarketPrice") or meta.get("chartPreviousClose")
-                prev_close = meta.get("chartPreviousClose") or last_price
-                if last_price:
-                    day_open = meta.get("regularMarketDayOpen") or last_price
-                    day_high = meta.get("regularMarketDayHigh") or last_price
-                    day_low = meta.get("regularMarketDayLow") or last_price
-                    volume = meta.get("regularMarketVolume") or 0
-                    change = round(float(last_price) - float(prev_close), 2) if prev_close else 0.0
-                    change_pct = round((change / float(prev_close)) * 100, 2) if prev_close else 0.0
-                    now_ts = int(time.time())
 
-                    return {
-                        "symbol": symbol.upper(),
-                        "ticker": ticker,
-                        "last_price": round(float(last_price), 2),
-                        "open": round(float(day_open), 2),
-                        "high": round(float(day_high), 2),
-                        "low": round(float(day_low), 2),
-                        "close": round(float(prev_close), 2),
-                        "volume": int(volume),
-                        "change": change,
-                        "change_pct": change_pct,
-                        "timestamp": now_ts
-                    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("chart", {}).get("result", [])
+                if not results:
+                    return None
+                
+                meta = results[0].get("meta", {})
+                lp = meta.get("regularMarketPrice", 0.0)
+                prev_close = meta.get("chartPreviousClose", meta.get("previousClose", lp))
+                vol = meta.get("regularMarketVolume", 0)
+                day_high = meta.get("regularMarketDayHigh", lp)
+                day_low = meta.get("regularMarketDayLow", lp)
+                open_p = meta.get("regularMarketOpen", prev_close)
+
+                chg_pct = round(((lp - prev_close) / prev_close * 100), 2) if prev_close else 0.0
+                
+                quote = {
+                    "symbol": clean_sym,
+                    "last_price": round(float(lp), 2),
+                    "open": round(float(open_p), 2),
+                    "high": round(float(day_high), 2),
+                    "low": round(float(day_low), 2),
+                    "close": round(float(prev_close), 2),
+                    "volume": int(vol),
+                    "change_pct": chg_pct,
+                    "source": "NSE Live Feed"
+                }
+                
+                _LIVE_QUOTE_CACHE[clean_sym] = (now, quote)
+                return quote
     except Exception as e:
-        logger.debug(f"Error fetching live quote for {symbol}: {e}")
+        logger.debug(f"Live quote fetch error for {symbol}: {e}")
+        
     return None
 
 async def get_batch_live_quotes(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
-    """
-    Asynchronously retrieves real-time live quotes for a list of symbols.
-    Uses in-memory cache to ensure extreme performance and prevent rate limiting.
-    """
-    global _QUOTE_CACHE, _CACHE_TIMESTAMP
+    """Concurrently fetches quotes for a batch of stocks."""
+    import asyncio
+    results = {}
+    sem = asyncio.Semaphore(15)
 
-    now = time.time()
-    clean_symbols = [s.strip().upper() for s in symbols if s.strip()]
-    if not clean_symbols:
-        return {}
+    async def fetch_one(sym: str):
+        async with sem:
+            q = await get_live_quote(sym)
+            if q:
+                results[sym] = q
 
-    # Check if all requested symbols are in cache and still fresh (< 10s)
-    missing = [s for s in clean_symbols if s not in _QUOTE_CACHE or (now - _QUOTE_CACHE[s].get("_cached_at", 0)) > 10.0]
-    if not missing:
-        return {s: _QUOTE_CACHE[s] for s in clean_symbols if s in _QUOTE_CACHE}
+    tasks = [fetch_one(s) for s in symbols]
+    await asyncio.gather(*tasks, return_exceptions=True)
+    return results
 
-    # Fetch missing quotes concurrently with high-speed semaphore
-    semaphore = asyncio.Semaphore(25)
-
-    async with httpx.AsyncClient(timeout=4.5) as client:
-        async def worker(sym: str):
-            async with semaphore:
-                quote = await fetch_single_live_quote(client, sym)
-                if quote:
-                    quote["_cached_at"] = now
-                    async with _CACHE_LOCK:
-                        _QUOTE_CACHE[sym] = quote
-
-        await asyncio.gather(*[worker(s) for s in missing], return_exceptions=True)
-
-    return {s: _QUOTE_CACHE[s] for s in clean_symbols if s in _QUOTE_CACHE}
-
-async def get_today_live_candle(symbol: str) -> Optional[List[Any]]:
-    """
-    Synthesizes today's current daily candle for an NSE stock in Upstox candle format:
-    [timestamp, open, high, low, close, volume, open_interest]
-    """
-    quotes = await get_batch_live_quotes([symbol])
-    q = quotes.get(symbol.upper())
-    if not q:
-        return None
-
-    ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-    timestamp = f"{ist_now.strftime('%Y-%m-%d')}T00:00:00+05:30"
+def format_quote_as_candle(q: Dict[str, Any]) -> List[Any]:
+    """Formats a quote dict into Upstox-style candle format."""
+    now_ist = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%dT%H:%M:%S+05:30")
     return [
-        timestamp,
+        now_ist,
         q["open"],
         q["high"],
         q["low"],
@@ -134,19 +110,20 @@ async def get_today_live_candle(symbol: str) -> Optional[List[Any]]:
         0
     ]
 
-async def get_intraday_10m_candles_fallback(symbol: str, min_candles: int = 35) -> List[List[Any]]:
+async def get_intraday_candles_fallback(symbol: str, interval_minutes: int = 10, min_candles: int = 35) -> List[List[Any]]:
     """
-    Retrieves intraday 10-minute candles via real-time market data feed when Upstox token is
-    not present or rate-limited. Fetches 5m intraday bars and aggregates into completed 10m bars.
+    Retrieves intraday candles (5m, 10m, 15m) via real-time market data feed when Upstox token is
+    not present or rate-limited. Fetches 5m intraday bars and aggregates into completed bars.
     Returns list of [timestamp, open, high, low, close, volume, 0] formatted newest first.
     """
     now = time.time()
     clean_sym = symbol.strip().upper()
+    cache_key = f"{clean_sym}_{interval_minutes}m"
 
     # Check 60-second candle cache for instant delivery
-    if clean_sym in _INTRADAY_CANDLE_CACHE:
-        c_ts, c_data = _INTRADAY_CANDLE_CACHE[clean_sym]
-        if (now - c_ts) < 60.0 and len(c_data) >= min_candles:
+    if cache_key in _INTRADAY_CANDLE_CACHE:
+        c_ts, c_data = _INTRADAY_CANDLE_CACHE[cache_key]
+        if (now - c_ts) < _CANDLE_CACHE_TTL and len(c_data) >= min_candles:
             return c_data
 
     ticker = get_yahoo_ticker(clean_sym)
@@ -193,30 +170,47 @@ async def get_intraday_10m_candles_fallback(symbol: str, min_candles: int = 35) 
                     b_dt = datetime.fromtimestamp(b["ts"], tz=timezone(timedelta(hours=5, minutes=30)))
                     day_buckets[b_dt.date()].append(b)
 
-                candles_10m = []
+                step = max(1, interval_minutes // 5)
+                aggregated_candles = []
                 for d_key in sorted(day_buckets.keys()):
                     d_bars = day_buckets[d_key]
-                    for i in range(0, len(d_bars) - 1, 2):
-                        b1 = d_bars[i]
-                        b2 = d_bars[i + 1]
-                        dt = datetime.fromtimestamp(b1["ts"], tz=timezone(timedelta(hours=5, minutes=30)))
-                        ts_str = dt.strftime("%Y-%m-%dT%H:%M:%S+05:30")
-                        o = b1["open"]
-                        h = max(b1["high"], b2["high"])
-                        l = min(b1["low"], b2["low"])
-                        c = b2["close"]
-                        v = b1["volume"] + b2["volume"]
-                        candles_10m.append([ts_str, round(o, 2), round(h, 2), round(l, 2), round(c, 2), v, 0])
+                    if step == 1:
+                        # 5-minute bars direct
+                        for b in d_bars:
+                            dt = datetime.fromtimestamp(b["ts"], tz=timezone(timedelta(hours=5, minutes=30)))
+                            ts_str = dt.strftime("%Y-%m-%dT%H:%M:%S+05:30")
+                            aggregated_candles.append([
+                                ts_str, round(b["open"], 2), round(b["high"], 2),
+                                round(b["low"], 2), round(b["close"], 2), b["volume"], 0
+                            ])
+                    else:
+                        # Multi-bar aggregation (e.g. 10m = 2 bars, 15m = 3 bars)
+                        for i in range(0, len(d_bars) - step + 1, step):
+                            slice_bars = d_bars[i : i + step]
+                            b_first = slice_bars[0]
+                            b_last = slice_bars[-1]
+                            dt = datetime.fromtimestamp(b_first["ts"], tz=timezone(timedelta(hours=5, minutes=30)))
+                            ts_str = dt.strftime("%Y-%m-%dT%H:%M:%S+05:30")
+                            o = b_first["open"]
+                            h = max(b["high"] for b in slice_bars)
+                            l = min(b["low"] for b in slice_bars)
+                            c = b_last["close"]
+                            v = sum(b["volume"] for b in slice_bars)
+                            aggregated_candles.append([ts_str, round(o, 2), round(h, 2), round(l, 2), round(c, 2), v, 0])
 
                 # Return newest first to match Upstox candle format
-                candles_10m.reverse()
-                if candles_10m:
-                    if len(_INTRADAY_CANDLE_CACHE) >= 100 and clean_sym not in _INTRADAY_CANDLE_CACHE:
+                aggregated_candles.reverse()
+                if aggregated_candles:
+                    if len(_INTRADAY_CANDLE_CACHE) >= 150 and cache_key not in _INTRADAY_CANDLE_CACHE:
                         oldest = min(_INTRADAY_CANDLE_CACHE.keys(), key=lambda k: _INTRADAY_CANDLE_CACHE[k][0])
                         _INTRADAY_CANDLE_CACHE.pop(oldest, None)
-                    _INTRADAY_CANDLE_CACHE[clean_sym] = (now, candles_10m)
-                return candles_10m
+                    _INTRADAY_CANDLE_CACHE[cache_key] = (now, aggregated_candles)
+                return aggregated_candles
     except Exception as e:
-        logger.debug(f"Intraday fallback candle fetch error for {symbol}: {e}")
+        logger.debug(f"Intraday fallback candle fetch error for {symbol} ({interval_minutes}m): {e}")
 
     return []
+
+async def get_intraday_10m_candles_fallback(symbol: str, min_candles: int = 35) -> List[List[Any]]:
+    """Legacy backward-compatible wrapper for 10-minute fallback candles."""
+    return await get_intraday_candles_fallback(symbol, interval_minutes=10, min_candles=min_candles)

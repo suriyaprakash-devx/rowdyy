@@ -539,3 +539,434 @@ def test_stock_analysis_fundamentals_endpoint():
     assert "fundamental_score" in data
     assert "fundamental_verdict" in data
     assert "strengths" in data
+
+
+# ==============================================================================
+# 12. INSTITUTIONAL LIQUIDITY SWEEP + BOS + FVG STRATEGY TESTS
+# ==============================================================================
+
+def test_fvg_3_candle_imbalance_detection():
+    """Verify 3-candle Fair Value Gap (FVG) detection for both Bullish and Bearish imbalances."""
+    from backend.strategy import detect_fair_value_gaps
+    
+    # 1. Bullish FVG: Candle 1 High < Candle 3 Low
+    bullish_data = [
+        {"open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0, "volume": 1000},
+        {"open": 101.0, "high": 112.0, "low": 101.0, "close": 111.0, "volume": 5000}, # Displacement
+        {"open": 111.0, "high": 116.0, "low": 107.0, "close": 115.0, "volume": 2000},
+    ]
+    df_bull = pd.DataFrame(bullish_data)
+    fvgs_bull = detect_fair_value_gaps(df_bull)
+    assert len(fvgs_bull) == 1
+    assert fvgs_bull[0]["type"] == "Bullish"
+    assert fvgs_bull[0]["gap_low"] == 102.0
+    assert fvgs_bull[0]["gap_high"] == 107.0
+    assert fvgs_bull[0]["gap_size"] == 5.0
+
+    # 2. Bearish FVG: Candle 1 Low > Candle 3 High
+    bearish_data = [
+        {"open": 115.0, "high": 116.0, "low": 112.0, "close": 113.0, "volume": 1000},
+        {"open": 113.0, "high": 113.0, "low": 102.0, "close": 103.0, "volume": 5000}, # Displacement
+        {"open": 103.0, "high": 107.0, "low": 100.0, "close": 101.0, "volume": 2000},
+    ]
+    df_bear = pd.DataFrame(bearish_data)
+    fvgs_bear = detect_fair_value_gaps(df_bear)
+    assert len(fvgs_bear) == 1
+    assert fvgs_bear[0]["type"] == "Bearish"
+    assert fvgs_bear[0]["gap_low"] == 107.0
+    assert fvgs_bear[0]["gap_high"] == 112.0
+    assert fvgs_bear[0]["gap_size"] == 5.0
+
+
+def test_bullish_liquidity_sweep_bos_fvg_buy_strategy():
+    """Verify end-to-end BUY strategy: Liquidity Sweep + Bullish BOS + FVG Retracement."""
+    from backend.strategy import strategy_engine
+    
+    base_time = datetime(2026, 1, 1, 9, 15)
+    rows = []
+    # 25 bars baseline range around 1000.0
+    for i in range(25):
+        rows.append([
+            (base_time + timedelta(minutes=10 * i)).isoformat(),
+            1000.0, 1003.0, 997.0, 1000.0, 10000.0, 0
+        ])
+    
+    # Bar 25: Swing Low formed at 995.0
+    rows.append([(base_time + timedelta(minutes=250)).isoformat(), 1000.0, 1001.0, 995.0, 998.0, 10000.0, 0])
+    
+    # Bar 26: Swing High formed at 1008.0
+    rows.append([(base_time + timedelta(minutes=260)).isoformat(), 998.0, 1008.0, 997.0, 1006.0, 12000.0, 0])
+    
+    # Bar 27: Liquidity Sweep of Swing Low (dips to 993.0 < 995.0, closes at 999.0 > 995.0)
+    rows.append([(base_time + timedelta(minutes=270)).isoformat(), 996.0, 1000.0, 993.0, 999.0, 18000.0, 0])
+    
+    # Bar 28: Bullish Displacement creating FVG Candle 1
+    rows.append([(base_time + timedelta(minutes=280)).isoformat(), 999.0, 1004.0, 998.0, 1003.0, 15000.0, 0])
+    
+    # Bar 29: Massive Displacement Candle 2 (closes at 1018.0 > 1008.0 BOS)
+    rows.append([(base_time + timedelta(minutes=290)).isoformat(), 1003.0, 1020.0, 1002.0, 1018.0, 35000.0, 0])
+    
+    # Bar 30: FVG Candle 3 (Low at 1010.0 > Bar 28 High 1004.0 -> FVG [1004, 1010])
+    rows.append([(base_time + timedelta(minutes=300)).isoformat(), 1018.0, 1025.0, 1010.0, 1022.0, 25000.0, 0])
+    
+    # Bar 31: Retracement into FVG Zone [1004 - 1010] (low dips to 1008.0, closes at 1015.0)
+    rows.append([(base_time + timedelta(minutes=310)).isoformat(), 1020.0, 1021.0, 1008.0, 1015.0, 22000.0, 0])
+    
+    # Bar 32: Bullish Confirmation Candle (closes at 1024.0 with 2.5x volume)
+    rows.append([(base_time + timedelta(minutes=320)).isoformat(), 1015.0, 1026.0, 1014.0, 1024.0, 30000.0, 0])
+
+    res = strategy_engine.analyze_stock(
+        symbol="SBIN",
+        company="State Bank of India",
+        raw_candles=rows[::-1], # Newest first as per Upstox convention
+        activity_rank=5,
+        session_traded_value_cr=45.0,
+        bid_ask_spread_pct=0.03
+    )
+
+    assert res is not None
+    assert res["Symbol"] == "SBIN"
+    assert res["Signal"] == "BUY"
+    assert res["Status"] == "BUY"
+    assert res["Is Confirmed"] is True
+    assert "Bullish Sweep" in res["Sweep"] or res["Sweep Type"] == "Bullish"
+    assert res["BOS"] == "Bullish"
+    assert res["FVG"] == "Bullish"
+    assert "1:2 / 1:3" in res["Risk/Reward"]
+    assert res["Target 1"] > res["Entry"]
+    assert res["Target 2"] > res["Target 1"]
+    assert res["Stop-Loss"] < res["Entry"]
+    assert res["Score"] >= 75.0
+
+
+def test_bearish_liquidity_sweep_bos_fvg_sell_strategy():
+    """Verify end-to-end SELL strategy: Liquidity Sweep of High + Bearish BOS + FVG Retracement."""
+    from backend.strategy import strategy_engine
+    
+    base_time = datetime(2026, 1, 1, 9, 15)
+    rows = []
+    # 25 bars baseline range around 1000.0
+    for i in range(25):
+        rows.append([
+            (base_time + timedelta(minutes=10 * i)).isoformat(),
+            1000.0, 1003.0, 997.0, 1000.0, 10000.0, 0
+        ])
+    
+    # Bar 25: Swing High formed at 1008.0
+    rows.append([(base_time + timedelta(minutes=250)).isoformat(), 1000.0, 1008.0, 999.0, 1002.0, 10000.0, 0])
+    
+    # Bar 26: Swing Low formed at 994.0
+    rows.append([(base_time + timedelta(minutes=260)).isoformat(), 1002.0, 1003.0, 994.0, 996.0, 12000.0, 0])
+    
+    # Bar 27: Liquidity Sweep of Swing High (spikes to 1011.0 > 1008.0, closes at 1004.0 < 1008.0)
+    rows.append([(base_time + timedelta(minutes=270)).isoformat(), 1004.0, 1011.0, 1001.0, 1004.0, 18000.0, 0])
+    
+    # Bar 28: Bearish Displacement creating FVG Candle 1
+    rows.append([(base_time + timedelta(minutes=280)).isoformat(), 1003.0, 1004.0, 996.0, 998.0, 15000.0, 0])
+    
+    # Bar 29: Massive Bearish Displacement Candle 2 (closes at 982.0 < 994.0 BOS)
+    rows.append([(base_time + timedelta(minutes=290)).isoformat(), 997.0, 998.0, 980.0, 982.0, 35000.0, 0])
+    
+    # Bar 30: FVG Candle 3 (High at 988.0 < Bar 28 Low 996.0 -> Bearish FVG [988, 996])
+    rows.append([(base_time + timedelta(minutes=300)).isoformat(), 982.0, 988.0, 975.0, 978.0, 25000.0, 0])
+    
+    # Bar 31: Retracement up into FVG Zone [988 - 996] (high touches 991.0, closes at 984.0)
+    rows.append([(base_time + timedelta(minutes=310)).isoformat(), 980.0, 991.0, 979.0, 984.0, 22000.0, 0])
+    
+    # Bar 32: Bearish Confirmation Candle (closes at 974.0 with 2.5x volume)
+    rows.append([(base_time + timedelta(minutes=320)).isoformat(), 984.0, 985.0, 972.0, 974.0, 30000.0, 0])
+
+    res = strategy_engine.analyze_stock(
+        symbol="TATASTEEL",
+        company="Tata Steel Limited",
+        raw_candles=rows[::-1],
+        activity_rank=8,
+        session_traded_value_cr=35.0,
+        bid_ask_spread_pct=0.03
+    )
+
+    assert res is not None
+    assert res["Symbol"] == "TATASTEEL"
+    assert res["Signal"] == "SELL"
+    assert res["Status"] == "SELL"
+    assert res["Is Confirmed"] is True
+    assert "Bearish Sweep" in res["Sweep"] or res["Sweep Type"] == "Bearish"
+    assert res["BOS"] == "Bearish"
+    assert res["FVG"] == "Bearish"
+    assert "1:2 / 1:3" in res["Risk/Reward"]
+    assert res["Target 1"] < res["Entry"]
+    assert res["Target 2"] < res["Target 1"]
+    assert res["Stop-Loss"] > res["Entry"]
+    assert res["Score"] >= 75.0
+
+
+def test_confluence_scoring_tiers():
+    """Verify 0-100 confluence scoring classification rules."""
+    from backend.strategy import strategy_engine
+    
+    # 1. High confluence: Sweep + BOS + FVG + RelVol >= 2.0x + Top 25
+    s1 = strategy_engine._compute_confluence_score(
+        has_sweep=True, has_bos=True, has_fvg=True,
+        rel_volume=2.2, is_confirmed=True, activity_rank=10, signal_type="BUY"
+    )
+    assert 85.0 <= s1 <= 100.0
+
+    # 2. Valid setup: Sweep + BOS + FVG + RelVol >= 1.5x
+    s2 = strategy_engine._compute_confluence_score(
+        has_sweep=True, has_bos=True, has_fvg=True,
+        rel_volume=1.6, is_confirmed=True, activity_rank=45, signal_type="BUY"
+    )
+    assert 75.0 <= s2 < 85.0
+
+    # 3. Incomplete: Missing FVG -> capped at WATCH (< 75.0)
+    s3 = strategy_engine._compute_confluence_score(
+        has_sweep=True, has_bos=True, has_fvg=False,
+        rel_volume=2.5, is_confirmed=False, activity_rank=1, signal_type="WATCH"
+    )
+    assert s3 < 75.0
+
+
+def test_position_size_calculator_api():
+    """Verify INR position size calculation, margin allocation, whole shares, and 15:15 IST square-off notice."""
+    from fastapi.testclient import TestClient
+    from backend.main import app
+    client = TestClient(app)
+
+    # 1. Buy setup sizing
+    payload = {
+        "capital_inr": 100000.0,
+        "risk_pct_or_inr": 1500.0,
+        "entry_price": 500.0,
+        "stop_loss": 490.0,
+        "target_1": 520.0,
+        "target_2": 530.0,
+        "is_short": False,
+        "leverage_mis": 5.0
+    }
+    resp = client.post("/api/scanner/position-size", json=payload)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    # 1500 / 10 = 150 shares
+    assert data["order_sizing"]["recommended_quantity"] == 150
+    assert data["capital_and_risk"]["actual_risk_inr"] == 1500.0
+    assert data["profit_projections"]["target_1_profit_inr"] == 3000.0
+    assert data["profit_projections"]["target_2_profit_inr"] == 4500.0
+    assert "15:15 IST" in data["compliance_notice"]
+
+    # 2. Short setup sizing with exchange short notice
+    payload_short = {
+        "capital_inr": 50000.0,
+        "risk_pct_or_inr": 1000.0,
+        "entry_price": 1000.0,
+        "stop_loss": 1020.0,
+        "target_1": 960.0,
+        "target_2": 940.0,
+        "is_short": True,
+        "leverage_mis": 5.0
+    }
+    resp_short = client.post("/api/scanner/position-size", json=payload_short)
+    assert resp_short.status_code == 200
+    data_short = resp_short.json()
+    # 1000 / 20 = 50 shares
+    assert data_short["order_sizing"]["recommended_quantity"] == 50
+    assert "SHORT" in data_short["compliance_notice"]
+    assert "15:15 IST" in data_short["compliance_notice"]
+
+
+def test_scanner_timeframe_parameter():
+    """Verify timeframe parameter support (5m, 10m, 15m) in scanner."""
+    from fastapi.testclient import TestClient
+    from backend.main import app
+    client = TestClient(app)
+
+    # Check status endpoint returns timeframe
+    resp = client.get("/api/scanner/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "timeframe" in data
+
+
+# ==============================================================================
+# 12. INSTITUTIONAL LIQUIDITY SWEEP + BOS + FVG STRATEGY TESTS
+# ==============================================================================
+
+def test_fvg_3_candle_imbalance_detection():
+    """Verify 3-candle Fair Value Gap (FVG) detection for both Bullish and Bearish imbalances."""
+    from backend.strategy import detect_fair_value_gaps
+    
+    # 1. Bullish FVG: Candle 1 High < Candle 3 Low
+    bullish_data = [
+        {"open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0, "volume": 1000},
+        {"open": 101.0, "high": 112.0, "low": 101.0, "close": 111.0, "volume": 5000}, # Displacement
+        {"open": 111.0, "high": 116.0, "low": 107.0, "close": 115.0, "volume": 2000},
+    ]
+    df_bull = pd.DataFrame(bullish_data)
+    fvgs_bull = detect_fair_value_gaps(df_bull)
+    assert len(fvgs_bull) == 1
+    assert fvgs_bull[0]["type"] == "Bullish"
+    assert fvgs_bull[0]["gap_low"] == 102.0
+    assert fvgs_bull[0]["gap_high"] == 107.0
+    assert fvgs_bull[0]["gap_size"] == 5.0
+
+    # 2. Bearish FVG: Candle 1 Low > Candle 3 High
+    bearish_data = [
+        {"open": 115.0, "high": 116.0, "low": 112.0, "close": 113.0, "volume": 1000},
+        {"open": 113.0, "high": 113.0, "low": 102.0, "close": 103.0, "volume": 5000}, # Displacement
+        {"open": 103.0, "high": 107.0, "low": 100.0, "close": 101.0, "volume": 2000},
+    ]
+    df_bear = pd.DataFrame(bearish_data)
+    fvgs_bear = detect_fair_value_gaps(df_bear)
+    assert len(fvgs_bear) == 1
+    assert fvgs_bear[0]["type"] == "Bearish"
+    assert fvgs_bear[0]["gap_low"] == 107.0
+    assert fvgs_bear[0]["gap_high"] == 112.0
+    assert fvgs_bear[0]["gap_size"] == 5.0
+
+
+def test_bullish_liquidity_sweep_bos_fvg_buy_strategy():
+    """Verify end-to-end BUY strategy: Liquidity Sweep + Bullish BOS + FVG Retracement."""
+    from backend.strategy import strategy_engine
+    
+    base_time = datetime(2026, 1, 1, 9, 15)
+    rows = []
+    # 25 bars baseline range around 1000.0
+    for i in range(25):
+        rows.append([
+            (base_time + timedelta(minutes=10 * i)).isoformat(),
+            1000.0, 1003.0, 997.0, 1000.0, 10000.0, 0
+        ])
+    
+    # Bar 25: Swing Low formed at 995.0
+    rows.append([(base_time + timedelta(minutes=250)).isoformat(), 1000.0, 1001.0, 995.0, 998.0, 10000.0, 0])
+    
+    # Bar 26: Swing High formed at 1008.0
+    rows.append([(base_time + timedelta(minutes=260)).isoformat(), 998.0, 1008.0, 997.0, 1006.0, 12000.0, 0])
+    
+    # Bar 27: Liquidity Sweep of Swing Low (dips to 993.0 < 995.0, closes at 999.0 > 995.0)
+    rows.append([(base_time + timedelta(minutes=270)).isoformat(), 996.0, 1000.0, 993.0, 999.0, 18000.0, 0])
+    
+    # Bar 28: Bullish Displacement creating FVG Candle 1
+    rows.append([(base_time + timedelta(minutes=280)).isoformat(), 999.0, 1004.0, 998.0, 1003.0, 15000.0, 0])
+    
+    # Bar 29: Massive Displacement Candle 2 (closes at 1018.0 > 1008.0 BOS)
+    rows.append([(base_time + timedelta(minutes=290)).isoformat(), 1003.0, 1020.0, 1002.0, 1018.0, 35000.0, 0])
+    
+    # Bar 30: FVG Candle 3 (Low at 1010.0 > Bar 28 High 1004.0 -> FVG [1004, 1010])
+    rows.append([(base_time + timedelta(minutes=300)).isoformat(), 1018.0, 1025.0, 1010.0, 1022.0, 25000.0, 0])
+    
+    # Bar 31: Retracement into FVG Zone [1004 - 1010] (low dips to 1008.0, closes at 1015.0)
+    rows.append([(base_time + timedelta(minutes=310)).isoformat(), 1020.0, 1021.0, 1008.0, 1015.0, 22000.0, 0])
+    
+    # Bar 32: Bullish Confirmation Candle (closes at 1024.0 with 2.5x volume)
+    rows.append([(base_time + timedelta(minutes=320)).isoformat(), 1015.0, 1026.0, 1014.0, 1024.0, 30000.0, 0])
+
+    res = strategy_engine.analyze_stock(
+        symbol="SBIN",
+        company="State Bank of India",
+        raw_candles=rows[::-1], # Newest first as per Upstox convention
+        activity_rank=5,
+        session_traded_value_cr=45.0,
+        bid_ask_spread_pct=0.03
+    )
+
+    assert res is not None
+    assert res["Symbol"] == "SBIN"
+    assert res["Signal"] == "BUY"
+    assert res["Status"] == "BUY"
+    assert res["Is Confirmed"] is True
+    assert "Bullish Sweep" in res["Sweep"] or res["Sweep Type"] == "Bullish"
+    assert res["BOS"] == "Bullish"
+    assert res["FVG"] == "Bullish"
+    assert "1:2 / 1:3" in res["Risk/Reward"]
+    assert res["Target 1"] > res["Entry"]
+    assert res["Target 2"] > res["Target 1"]
+    assert res["Stop-Loss"] < res["Entry"]
+    assert res["Score"] >= 75.0
+
+
+def test_bearish_liquidity_sweep_bos_fvg_sell_strategy():
+    """Verify end-to-end SELL strategy: Liquidity Sweep of High + Bearish BOS + FVG Retracement."""
+    from backend.strategy import strategy_engine
+    
+    base_time = datetime(2026, 1, 1, 9, 15)
+    rows = []
+    # 25 bars baseline range around 1000.0
+    for i in range(25):
+        rows.append([
+            (base_time + timedelta(minutes=10 * i)).isoformat(),
+            1000.0, 1003.0, 997.0, 1000.0, 10000.0, 0
+        ])
+    
+    # Bar 25: Swing High formed at 1008.0
+    rows.append([(base_time + timedelta(minutes=250)).isoformat(), 1000.0, 1008.0, 999.0, 1002.0, 10000.0, 0])
+    
+    # Bar 26: Swing Low formed at 994.0
+    rows.append([(base_time + timedelta(minutes=260)).isoformat(), 1002.0, 1003.0, 994.0, 996.0, 12000.0, 0])
+    
+    # Bar 27: Liquidity Sweep of Swing High (spikes to 1011.0 > 1008.0, closes at 1004.0 < 1008.0)
+    rows.append([(base_time + timedelta(minutes=270)).isoformat(), 1004.0, 1011.0, 1001.0, 1004.0, 18000.0, 0])
+    
+    # Bar 28: Bearish Displacement creating FVG Candle 1
+    rows.append([(base_time + timedelta(minutes=280)).isoformat(), 1003.0, 1004.0, 996.0, 998.0, 15000.0, 0])
+    
+    # Bar 29: Massive Bearish Displacement Candle 2 (closes at 982.0 < 994.0 BOS)
+    rows.append([(base_time + timedelta(minutes=290)).isoformat(), 997.0, 998.0, 980.0, 982.0, 35000.0, 0])
+    
+    # Bar 30: FVG Candle 3 (High at 988.0 < Bar 28 Low 996.0 -> Bearish FVG [988, 996])
+    rows.append([(base_time + timedelta(minutes=300)).isoformat(), 982.0, 988.0, 975.0, 978.0, 25000.0, 0])
+    
+    # Bar 31: Retracement up into FVG Zone [988 - 996] (high touches 991.0, closes at 984.0)
+    rows.append([(base_time + timedelta(minutes=310)).isoformat(), 980.0, 991.0, 979.0, 984.0, 22000.0, 0])
+    
+    # Bar 32: Bearish Confirmation Candle (closes at 974.0 with 2.5x volume)
+    rows.append([(base_time + timedelta(minutes=320)).isoformat(), 984.0, 985.0, 972.0, 974.0, 30000.0, 0])
+
+    res = strategy_engine.analyze_stock(
+        symbol="TATASTEEL",
+        company="Tata Steel Limited",
+        raw_candles=rows[::-1],
+        activity_rank=8,
+        session_traded_value_cr=35.0,
+        bid_ask_spread_pct=0.03
+    )
+
+    assert res is not None
+    assert res["Symbol"] == "TATASTEEL"
+    assert res["Signal"] == "SELL"
+    assert res["Status"] == "SELL"
+    assert res["Is Confirmed"] is True
+    assert "Bearish Sweep" in res["Sweep"] or res["Sweep Type"] == "Bearish"
+    assert res["BOS"] == "Bearish"
+    assert res["FVG"] == "Bearish"
+    assert "1:2 / 1:3" in res["Risk/Reward"]
+    assert res["Target 1"] < res["Entry"]
+    assert res["Target 2"] < res["Target 1"]
+    assert res["Stop-Loss"] > res["Entry"]
+    assert res["Score"] >= 75.0
+
+
+def test_confluence_scoring_tiers():
+    """Verify 0-100 confluence scoring classification rules."""
+    from backend.strategy import strategy_engine
+    
+    # 1. High confluence: Sweep + BOS + FVG + RelVol >= 2.0x + Top 25
+    s1 = strategy_engine._compute_confluence_score(
+        has_sweep=True, has_bos=True, has_fvg=True,
+        rel_volume=2.2, is_confirmed=True, activity_rank=10, signal_type="BUY"
+    )
+    assert 85.0 <= s1 <= 100.0
+
+    # 2. Valid setup: Sweep + BOS + FVG + RelVol >= 1.5x
+    s2 = strategy_engine._compute_confluence_score(
+        has_sweep=True, has_bos=True, has_fvg=True,
+        rel_volume=1.6, is_confirmed=True, activity_rank=45, signal_type="BUY"
+    )
+    assert 75.0 <= s2 < 85.0
+
+    # 3. Incomplete: Missing FVG -> capped at WATCH (< 75.0)
+    s3 = strategy_engine._compute_confluence_score(
+        has_sweep=True, has_bos=True, has_fvg=False,
+        rel_volume=2.5, is_confirmed=False, activity_rank=1, signal_type="WATCH"
+    )
+    assert s3 < 75.0

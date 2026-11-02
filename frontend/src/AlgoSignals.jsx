@@ -1131,11 +1131,11 @@ export default function AlgoSignals({ apiBase = '', initialSymbol = 'RELIANCE' }
                   {timeframe === 'intraday' ? 'INTRADAY AI SIGNAL TERMINAL' : 'AI SWING TRADING SYSTEM'}
                 </h1>
                 <span className="algo-version-pill">{timeframe === 'intraday' ? '10M COMPLETED BARS' : 'XGBOOST ML ENGINE'}</span>
-                <span className="algo-horizon-pill">{timeframe === 'intraday' ? 'VWAP & SMA 6/30' : '5-DAY SWING'}</span>
+                <span className="algo-horizon-pill">{timeframe === 'intraday' ? 'VWAP & SMC HMV-ALPHA' : '5-DAY SWING'}</span>
               </div>
               <p className="algo-subtitle">
                 {timeframe === 'intraday'
-                  ? 'Intraday 10-minute algorithmic execution terminal with VWAP, SMA 6/30 crossover, Supertrend (10, 2.0), Relative Volume confirmation, and interactive manual order ticket calculator.'
+                  ? 'Intraday algorithmic execution terminal with SMC Market Structure, Liquidity Sweeps, Fair Value Gaps, VWAP anchor, and interactive manual order ticket calculator.'
                   : 'Supervised machine learning probability classifier with Supertrend, multi-timeframe weekly confirmation, walk-forward backtesting, and automated risk/reward trade execution.'}
               </p>
 
@@ -1150,7 +1150,7 @@ export default function AlgoSignals({ apiBase = '', initialSymbol = 'RELIANCE' }
                   }}
                 >
                   <Zap size={13} />
-                  <span>⚡ 10m Intraday (VWAP + SMA 6/30)</span>
+                  <span>⚡ Intraday SMC + VWAP</span>
                 </button>
                 <button
                   type="button"
@@ -1270,7 +1270,7 @@ export default function AlgoSignals({ apiBase = '', initialSymbol = 'RELIANCE' }
           </div>
           <div className="loading-text-main">
             {timeframe === 'intraday'
-              ? `Analyzing Intraday VWAP & SMA 6/30 for ${symbol}...`
+              ? `Analyzing Intraday VWAP & SMC HMV-ALPHA for ${symbol}...`
               : `Training XGBoost ML Classifier for ${symbol}...`}
           </div>
           <div className="loading-step-msg font-mono">
@@ -1296,7 +1296,7 @@ export default function AlgoSignals({ apiBase = '', initialSymbol = 'RELIANCE' }
           </div>
           <h2 className="algo-welcome-title">
             {timeframe === 'intraday'
-              ? 'Institutional 10-Minute SMA 6/30 & VWAP Intraday Terminal'
+              ? 'Institutional HMV-Alpha & VWAP Intraday Terminal'
               : 'Institutional 4-Layer Machine Learning Swing Trading Engine'}
           </h2>
           <p className="algo-welcome-desc">
@@ -1325,7 +1325,7 @@ export default function AlgoSignals({ apiBase = '', initialSymbol = 'RELIANCE' }
             <div className="pillar-card-welcome">
               <div className="pillar-num">LAYER 01</div>
               <div className="pillar-title">Technical Matrix</div>
-              <div className="pillar-desc">SMA 6 & 30 Cross, Supertrend (10, 3), RSI 14, MACD, ADX 14 trend strength</div>
+              <div className="pillar-desc">Liquidity Sweep + BOS + FVG, Order Blocks, Supertrend & VWAP</div>
             </div>
             <div className="pillar-card-welcome">
               <div className="pillar-num">LAYER 02</div>

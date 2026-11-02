@@ -58,9 +58,9 @@ async def prewarm_instrument_cache():
         logger.warning(f"Background instrument preload warning: {e}")
 
 app = FastAPI(
-    title="NSE Most Active Stocks SMA 6/30 Intraday Scanner",
-    description="Semi-automated NSE equity intraday scanner evaluating completed 10-minute candles with SMA 6/30 crossover, volume expansion, and price action confirmation.",
-    version="2.0.0",
+    title="NSE Institutional High-Momentum Volatility Scanner (HMV-Alpha)",
+    description="Institutional semi-automated NSE equity intraday scanner evaluating completed candles with Liquidity Sweeps, Structural BOS, and 3-candle Fair Value Gaps.",
+    version="3.0.0",
     lifespan=lifespan
 )
 
@@ -224,6 +224,7 @@ async def get_most_active_stocks_endpoint(
 async def trigger_scan(
     universe: Optional[str] = "ALL",
     limit: Optional[int] = 500,
+    timeframe: Optional[str] = "10m",
     session: Optional[OAuthSession] = Depends(get_current_session_optional)
 ):
     """
@@ -253,7 +254,8 @@ async def trigger_scan(
             await scanner_manager.run_scan(
                 access_token=access_token,
                 universe_filter=universe or "ALL",
-                limit=limit or 500
+                limit=limit or 500,
+                timeframe=timeframe or "10m"
             )
         finally:
             _LEADERBOARD_CACHE["timestamp"] = 0.0
@@ -264,7 +266,8 @@ async def trigger_scan(
         "status": "started",
         "universe": universe or "ALL",
         "limit": limit or 500,
-        "message": f"NIFTY 500 Intraday scanner execution started on {universe or 'ALL'} stocks ({'Upstox v3' if access_token else 'Live Market Feed'}).",
+        "timeframe": timeframe or "10m",
+        "message": f"Institutional Liquidity Sweep + BOS + FVG Intraday Scanner started on {universe or 'ALL'} stocks ({timeframe or '10m'} timeframe, {'Upstox v3' if access_token else 'Live Feed'}).",
         "progress": scanner_manager.progress_message
     }
 
@@ -381,6 +384,8 @@ def get_scanner_results(
         "confirmed_buys": confirmed_buys,
         "confirmed_sells": confirmed_sells,
         "most_active_stocks": most_active_stocks,
+        "timeframe": getattr(scanner_manager, "current_timeframe", "10m"),
+        "strategy": "Institutional Liquidity Sweep + BOS + FVG",
         "market_session": get_nse_market_session(),
         "crossovers_count": len(confirmed_buys) + len(confirmed_sells),
         "bullish_crossovers": len(confirmed_buys),
@@ -422,6 +427,101 @@ async def get_bhavcopy_summary():
     Strictly for research, not live most-active ranking.
     """
     return await bhavcopy_manager.get_historical_liquidity_summary()
+
+
+class PositionSizeRequest(BaseModel):
+    capital_inr: float = 100000.0
+    risk_pct_or_inr: float = 1000.0
+    entry_price: float
+    stop_loss: float
+    target_1: Optional[float] = None
+    target_2: Optional[float] = None
+    is_short: bool = False
+    leverage_mis: float = 5.0
+
+@app.post("/api/scanner/position-size")
+def calculate_position_size(req: PositionSizeRequest):
+    """
+    Institutional INR Position Sizing Calculator.
+    Calculates exact whole share quantity based on structural stop loss,
+    risk in INR, margin required for NSE MIS intraday orders,
+    and returns 15:15 IST auto square-off compliance warnings.
+    """
+    entry = float(req.entry_price)
+    sl = float(req.stop_loss)
+    capital = max(1000.0, float(req.capital_inr))
+    
+    # Invalidation risk per share
+    risk_per_share = abs(entry - sl)
+    if risk_per_share <= 0:
+        risk_per_share = max(0.05, entry * 0.01)
+
+    # Risk amount in INR
+    if req.risk_pct_or_inr <= 100.0:
+        max_risk_inr = round(capital * (req.risk_pct_or_inr / 100.0), 2)
+    else:
+        max_risk_inr = round(float(req.risk_pct_or_inr), 2)
+
+    # Max shares by risk allocation
+    shares_by_risk = int(max_risk_inr / risk_per_share) if risk_per_share > 0 else 0
+
+    # Max shares by available intraday capital with leverage (default 5x on NSE MIS)
+    leverage = max(1.0, float(req.leverage_mis))
+    margin_per_share = entry / leverage
+    max_shares_by_capital = int(capital / margin_per_share) if margin_per_share > 0 else 0
+
+    # Recommend whole shares limited by risk first, capital second
+    rec_qty = max(1, min(shares_by_risk, max_shares_by_capital)) if (shares_by_risk > 0 and max_shares_by_capital > 0) else 1
+    
+    position_value = round(rec_qty * entry, 2)
+    margin_required = round(position_value / leverage, 2)
+    actual_risk_inr = round(rec_qty * risk_per_share, 2)
+
+    # Slippage and transaction cost estimate (~0.035% for NSE equity turnover, STT & stamp duty)
+    est_costs_inr = round(position_value * 0.00035, 2)
+
+    # Target profits
+    t1_profit = round(rec_qty * abs(req.target_1 - entry), 2) if req.target_1 else round(actual_risk_inr * 2.0, 2)
+    t2_profit = round(rec_qty * abs(req.target_2 - entry), 2) if req.target_2 else round(actual_risk_inr * 3.0, 2)
+
+    compliance_notice = (
+        "NSE INTRADAY SHORT (MIS) NOTICE: Cash equity short sales must be squared off before 15:15 IST. "
+        "Overnight short carry is strictly prohibited by exchange rules."
+        if req.is_short else
+        "NSE INTRADAY (MIS) NOTICE: Position will be auto squared-off by broker at 15:15 IST. Alert-only semi-automated mode."
+    )
+
+    return {
+        "status": "success",
+        "symbol_details": {
+            "entry_price": entry,
+            "stop_loss": sl,
+            "risk_per_share": round(risk_per_share, 2),
+            "target_1": req.target_1,
+            "target_2": req.target_2,
+            "is_short": req.is_short
+        },
+        "capital_and_risk": {
+            "capital_inr": capital,
+            "max_risk_inr": max_risk_inr,
+            "actual_risk_inr": actual_risk_inr,
+            "risk_pct_of_capital": round((actual_risk_inr / capital) * 100, 2)
+        },
+        "order_sizing": {
+            "recommended_quantity": rec_qty,
+            "position_value_inr": position_value,
+            "margin_required_inr": margin_required,
+            "leverage_multiplier": f"{leverage:.1f}x (NSE MIS)",
+            "estimated_charges_inr": est_costs_inr
+        },
+        "profit_projections": {
+            "target_1_profit_inr": t1_profit,
+            "target_1_rr": "1:2",
+            "target_2_profit_inr": t2_profit,
+            "target_2_rr": "1:3"
+        },
+        "compliance_notice": compliance_notice
+    }
 
 class BacktestRequest(BaseModel):
     symbol: str
@@ -602,6 +702,70 @@ async def get_smc_single_stock(symbol: str):
     if not result:
         raise HTTPException(status_code=404, detail=f"SMC analysis failed or no setup found for {symbol}")
     return result
+
+@app.get("/api/scanner/stock-detail/{symbol}")
+async def get_scanner_stock_detail(
+    symbol: str,
+    timeframe: str = "10m"
+):
+    """
+    Returns full institutional SMC breakdown for requested stock:
+    - 35 completed candles
+    - Chart overlay levels (Sweep, BOS, FVG, Dynamic SL, TP1, TP2, TP3)
+    - Full AI explanation payload (Validity, SL rationale, TP rationales, Opposing liquidity)
+    - Model probability and calibration
+    """
+    sym = symbol.upper().replace(".NS", "")
+    # Check if existing result in scanner cache
+    for res in scanner_manager.latest_results:
+        if (res.get("Symbol") or res.get("symbol") or "").upper() == sym:
+            return {
+                "status": "success",
+                "symbol": sym,
+                "data": res
+            }
+
+    # If not in active cache, run on-demand analysis via live_feed
+    try:
+        from backend.live_feed import live_feed_manager
+        from backend.strategy import strategy_engine
+        interval_mins = 10
+        if timeframe == "5m":
+            interval_mins = 5
+        elif timeframe == "15m":
+            interval_mins = 15
+
+        raw_candles = await live_feed_manager.fetch_candles(sym, interval_minutes=interval_mins, days=5)
+        if raw_candles and len(raw_candles) >= 20:
+            analysis = strategy_engine.analyze_stock(
+                symbol=sym,
+                company=sym,
+                raw_candles=raw_candles,
+                activity_rank=1,
+                session_traded_value_cr=25.0,
+                bid_ask_spread_pct=0.03,
+                timeframe_minutes=interval_mins
+            )
+            if analysis:
+                return {
+                    "status": "success",
+                    "symbol": sym,
+                    "data": analysis
+                }
+    except Exception as e:
+        logger.warning(f"Live feed analysis fallback for {sym}: {e}")
+
+    # Fallback to intraday AI analysis
+    try:
+        from backend.algo_intraday import run_ai_intraday_analysis
+        ai_res = run_ai_intraday_analysis(sym, timeframe="intraday")
+        return {
+            "status": "success",
+            "symbol": sym,
+            "data": ai_res
+        }
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Stock data unavailable for {sym}: {e}")
 
 # ----------------- Algo Signals Endpoints (Intraday AI & Swing Trading) -----------------
 import json
